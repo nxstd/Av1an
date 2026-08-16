@@ -1377,9 +1377,7 @@ fn finish_post_processing(
             "Concatenation failed for unknown reasons! Temp folder will not be deleted: {}",
             temp.display()
         );
-    } else if !keep
-        && let Err(error) = fs::remove_dir_all(temp)
-    {
+    } else if !keep && let Err(error) = fs::remove_dir_all(temp) {
         warn!("Failed to delete temp directory: {error}");
     }
 
