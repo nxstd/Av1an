@@ -275,7 +275,8 @@ impl Broker<'_> {
                         ) {
                             if is_termination_requested(terminations_requested) {
                                 bail!(
-                                    "Termination requested during Target Quality. Skipping chunk {}",
+                                    "Termination requested during Target Quality. Skipping chunk \
+                                     {}",
                                     chunk.index
                                 );
                             }
@@ -442,26 +443,26 @@ mod tests {
         target_quality.target = Some((95.0, 96.0));
 
         Chunk {
-            temp:                  "/tmp".to_owned(),
-            index:                 12,
-            input:                 Input::Video {
+            temp: "/tmp".to_owned(),
+            index: 12,
+            input: Input::Video {
                 path:         "test.mkv".into(),
                 temp:         "/tmp".to_owned(),
                 chunk_method: ChunkMethod::Select,
                 is_proxy:     false,
                 cache_mode:   vapoursynth::CacheSource::SOURCE,
             },
-            proxy:                 None,
-            source_cmd:            vec![],
-            proxy_cmd:             None,
-            output_ext:            "ivf".to_owned(),
-            start_frame:           0,
-            end_frame:             5,
-            frame_rate:            30.0,
-            passes:                1,
-            video_params:          vec![],
-            encoder:               Encoder::svt_av1,
-            noise_size:            (None, None),
+            proxy: None,
+            source_cmd: vec![],
+            proxy_cmd: None,
+            output_ext: "ivf".to_owned(),
+            start_frame: 0,
+            end_frame: 5,
+            frame_rate: 30.0,
+            passes: 1,
+            video_params: vec![],
+            encoder: Encoder::svt_av1,
+            noise_size: (None, None),
             target_quality,
             tq_cq,
             ignore_frame_mismatch: false,
