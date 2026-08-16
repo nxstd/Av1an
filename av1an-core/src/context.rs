@@ -445,7 +445,7 @@ impl Av1anContext {
                 },
             }
 
-            if self.args.vmaf {
+            let final_vmaf_result = if self.args.vmaf {
                 let vmaf_res = if self.args.target_quality.vmaf_res == "inputres" {
                     let inputres = self.args.input.clip_info()?.resolution;
                     format!("{width}x{height}", width = inputres.0, height = inputres.1)
@@ -461,39 +461,29 @@ impl Av1anContext {
                     .target_quality
                     .vmaf_filter
                     .as_deref());
+                let vmaf_threads = available_parallelism().map_or(1, std::num::NonZero::get);
 
-                if self.args.vmaf {
-                    let vmaf_threads = available_parallelism().map_or(1, std::num::NonZero::get);
+                vmaf::plot(
+                    self.args.output_file.as_ref(),
+                    &self.args.input,
+                    vmaf_model,
+                    &vmaf_res,
+                    vmaf_scaler,
+                    1,
+                    vmaf_filter,
+                    vmaf_threads,
+                    &self.args.target_quality.probing_vmaf_features,
+                )
+            } else {
+                Ok(())
+            };
 
-                    if let Err(e) = vmaf::plot(
-                        self.args.output_file.as_ref(),
-                        &self.args.input,
-                        vmaf_model,
-                        &vmaf_res,
-                        vmaf_scaler,
-                        1,
-                        vmaf_filter,
-                        vmaf_threads,
-                        &self.args.target_quality.probing_vmaf_features,
-                    ) {
-                        error!("VMAF calculation failed with error: {e}");
-                    }
-                }
-            }
-
-            if !Path::new(&self.args.output_file).exists() {
-                warn!(
-                    "Concatenation failed for unknown reasons! Temp folder will not be deleted: \
-                     {temp}",
-                    temp = self.args.temp
-                );
-            } else if !self.args.keep
-                && let Err(e) = fs::remove_dir_all(&self.args.temp)
-            {
-                warn!("Failed to delete temp directory: {e}");
-            }
-
-            Ok(())
+            finish_post_processing(
+                Path::new(&self.args.temp),
+                Path::new(&self.args.output_file),
+                self.args.keep,
+                final_vmaf_result,
+            )
         })
         .expect("thread should spawn successfully")?;
 
@@ -1368,6 +1358,34 @@ impl Av1anContext {
     }
 }
 
+fn finish_post_processing(
+    temp: &Path,
+    output: &Path,
+    keep: bool,
+    final_vmaf_result: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    if let Err(error) = final_vmaf_result {
+        error!(
+            "Final VMAF calculation failed; preserving temporary directory {}: {error}",
+            temp.display()
+        );
+        return Err(error).context("Final VMAF calculation failed");
+    }
+
+    if !output.exists() {
+        warn!(
+            "Concatenation failed for unknown reasons! Temp folder will not be deleted: {}",
+            temp.display()
+        );
+    } else if !keep
+        && let Err(error) = fs::remove_dir_all(temp)
+    {
+        warn!("Failed to delete temp directory: {error}");
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1635,5 +1653,70 @@ mod tests {
             .expect("unfinished chunk should remain in queue");
         assert!(unfinished_tq_chunk.target_quality.target.is_some());
         assert!(unfinished_tq_chunk.tq_cq.is_none());
+    }
+
+    fn temp_and_output() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempdir().expect("temp dir should be created");
+        let temp = root.path().join("temp");
+        let output = root.path().join("output.mkv");
+        fs::create_dir(&temp).expect("temporary directory should be created");
+        fs::write(temp.join("chunks.json"), "[]").expect("recovery state should be written");
+        fs::write(&output, "output").expect("output should be written");
+        (root, temp, output)
+    }
+
+    #[test]
+    fn successful_final_vmaf_deletes_temp_when_not_kept() {
+        let (_root, temp, output) = temp_and_output();
+
+        finish_post_processing(&temp, &output, false, Ok(())).expect("finalization should succeed");
+
+        assert!(!temp.exists());
+        assert!(output.exists());
+    }
+
+    #[test]
+    fn failed_final_vmaf_preserves_temp_and_output() {
+        let (_root, temp, output) = temp_and_output();
+
+        let error = finish_post_processing(
+            &temp,
+            &output,
+            false,
+            Err(anyhow::anyhow!("VMAF subprocess interrupted")),
+        )
+        .expect_err("failed VMAF should fail finalization");
+
+        assert!(error.to_string().contains("Final VMAF calculation failed"));
+        assert!(temp.join("chunks.json").exists());
+        assert!(output.exists());
+    }
+
+    #[test]
+    fn no_final_vmaf_keeps_existing_cleanup_behavior() {
+        let (_root, temp, output) = temp_and_output();
+
+        finish_post_processing(&temp, &output, false, Ok(())).expect("finalization should succeed");
+
+        assert!(!temp.exists());
+    }
+
+    #[test]
+    fn keep_preserves_temp_after_successful_final_vmaf() {
+        let (_root, temp, output) = temp_and_output();
+
+        finish_post_processing(&temp, &output, true, Ok(())).expect("finalization should succeed");
+
+        assert!(temp.join("chunks.json").exists());
+    }
+
+    #[test]
+    fn missing_output_preserves_temp() {
+        let (_root, temp, output) = temp_and_output();
+        fs::remove_file(&output).expect("output should be removed");
+
+        finish_post_processing(&temp, &output, false, Ok(())).expect("finalization should succeed");
+
+        assert!(temp.join("chunks.json").exists());
     }
 }
