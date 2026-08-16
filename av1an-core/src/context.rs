@@ -143,8 +143,6 @@ impl Av1anContext {
             }
         }
 
-
-
         if self.args.resume && done_json_exists {
             let done = fs::read_to_string(done_path)
                 .with_context(|| "Failed to read contents of done.json")?;
@@ -1430,11 +1428,7 @@ mod tests {
         target_quality
     }
 
-    fn build_context(
-        temp: &Path,
-        resume: bool,
-        target_quality: TargetQuality,
-    ) -> Av1anContext {
+    fn build_context(temp: &Path, resume: bool, target_quality: TargetQuality) -> Av1anContext {
         let input = Input::Video {
             path:         test_input_path(),
             temp:         temp.to_string_lossy().to_string(),
@@ -1582,15 +1576,14 @@ mod tests {
 
         save_chunk_queue(temp.path().to_string_lossy().as_ref(), &queue)
             .expect("chunk queue should serialize");
-        let chunk_json = fs::read_to_string(temp.path().join("chunks.json"))
-            .expect("chunks.json should exist");
+        let chunk_json =
+            fs::read_to_string(temp.path().join("chunks.json")).expect("chunks.json should exist");
         assert_eq!(
             chunk_json.matches("\"per_shot_target_quality_cq\":null").count(),
             queue.len()
         );
 
-        let reloaded =
-            read_chunk_queue(temp.path()).expect("chunk queue should deserialize");
+        let reloaded = read_chunk_queue(temp.path()).expect("chunk queue should deserialize");
         assert!(reloaded.iter().all(|chunk| chunk.tq_cq.is_none()));
     }
 
