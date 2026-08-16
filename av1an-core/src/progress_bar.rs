@@ -272,9 +272,29 @@ pub fn update_mp_msg(worker_idx: usize, msg: String) {
     }
 }
 
+pub fn update_worker_progress_msg(verbosity: Verbosity, worker_idx: usize, msg: String) {
+    match verbosity {
+        Verbosity::Normal => {
+            if let Some(pb) = PROGRESS_BAR.get() {
+                pb.set_message(msg);
+            }
+        },
+        Verbosity::Verbose => update_mp_msg(worker_idx, msg),
+        Verbosity::Quiet => {},
+    }
+}
+
 pub fn inc_mp_bar(inc: u64) {
     if let Some((_, pbs)) = MULTI_PROGRESS_BAR.get() {
         pbs.last().expect("at least one progress bar exists").inc(inc);
+    }
+}
+
+pub fn inc_progress_bar_for_verbosity(verbosity: Verbosity, inc: u64) {
+    match verbosity {
+        Verbosity::Normal => inc_bar(inc),
+        Verbosity::Verbose => inc_mp_bar(inc),
+        Verbosity::Quiet => {},
     }
 }
 

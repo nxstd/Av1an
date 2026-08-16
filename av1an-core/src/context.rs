@@ -997,13 +997,6 @@ impl Av1anContext {
             self.args.chroma_noise,
             color_range,
         )?;
-        if chunk.target_quality.target.is_some() {
-            chunk.tq_cq = Some(chunk.target_quality.per_shot_target_quality(
-                &chunk,
-                None,
-                self.args.vapoursynth_plugins,
-            )?);
-        }
         Ok(chunk)
     }
 
