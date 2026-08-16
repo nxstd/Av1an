@@ -211,7 +211,7 @@ impl TargetQuality {
                 break;
             }
 
-            ensure_target_quality_not_terminated(terminations_requested)?;
+            ensure_target_quality_not_hard_shutdown(terminations_requested)?;
 
             let current_probe = quantizer_score_history.len() + 1;
             update_progress_bar(current_probe, next_quantizer);
@@ -903,13 +903,13 @@ impl TargetQuality {
     }
 }
 
-fn ensure_target_quality_not_terminated(
+fn ensure_target_quality_not_hard_shutdown(
     terminations_requested: Option<&AtomicU8>,
 ) -> anyhow::Result<()> {
     if terminations_requested.is_some_and(|terminations_requested| {
-        terminations_requested.load(AtomicOrdering::SeqCst) > 0
+        terminations_requested.load(AtomicOrdering::SeqCst) >= 2
     }) {
-        bail!("Termination requested during Target Quality");
+        bail!("Hard shutdown requested during Target Quality");
     }
 
     Ok(())
@@ -1208,11 +1208,20 @@ mod tests {
     }
 
     #[test]
-    fn termination_between_probes_prevents_the_next_probe() {
+    fn first_ctrl_c_does_not_abort_target_quality_between_probes() {
+        let no_termination_requested = AtomicU8::new(0);
         let terminations_requested = AtomicU8::new(1);
 
-        assert!(ensure_target_quality_not_terminated(Some(&terminations_requested)).is_err());
-        assert!(ensure_target_quality_not_terminated(None).is_ok());
+        assert!(ensure_target_quality_not_hard_shutdown(Some(&no_termination_requested)).is_ok());
+        assert!(ensure_target_quality_not_hard_shutdown(Some(&terminations_requested)).is_ok());
+        assert!(ensure_target_quality_not_hard_shutdown(None).is_ok());
+    }
+
+    #[test]
+    fn second_ctrl_c_aborts_target_quality_between_probes() {
+        let terminations_requested = AtomicU8::new(2);
+
+        assert!(ensure_target_quality_not_hard_shutdown(Some(&terminations_requested)).is_err());
     }
 
     #[test]
