@@ -32,12 +32,13 @@ use crate::{
         vmaf::{get_vmaf_model_version, read_vmaf_file, run_vmaf, run_vmaf_weighted},
         xpsnr::{read_xpsnr_file, run_xpsnr, XPSNRSubMetric},
     },
-    progress_bar::update_mp_msg,
+    progress_bar::update_worker_progress_msg,
     vapoursynth::{measure_butteraugli, measure_ssimulacra2, measure_xpsnr, VapoursynthPlugins},
     Encoder,
     ProbingStatistic,
     ProbingStatisticName,
     TargetMetric,
+    Verbosity,
     VmafFeature,
 };
 
@@ -97,6 +98,24 @@ pub struct TargetQuality {
 }
 
 impl TargetQuality {
+    fn format_probe_status(
+        &self,
+        chunk: &Chunk,
+        target: (f64, f64),
+        current_probe: usize,
+        next_quantizer: f32,
+    ) -> String {
+        format!(
+            "TQ chunk {chunk:05}: {metric} {min}-{max}, probe {current_probe}/{max_probes}, \
+             Q={next_quantizer}",
+            chunk = chunk.index,
+            metric = self.metric,
+            min = target.0,
+            max = target.1,
+            max_probes = self.probes
+        )
+    }
+
     #[inline]
     pub fn default(temp_dir: &str, encoder: Encoder) -> Self {
         Self {
@@ -135,6 +154,7 @@ impl TargetQuality {
         &self,
         chunk: &Chunk,
         worker_id: Option<usize>,
+        verbosity: Verbosity,
         plugins: Option<VapoursynthPlugins>,
     ) -> anyhow::Result<f32> {
         anyhow::ensure!(self.target.is_some(), "Target must be some");
@@ -142,17 +162,12 @@ impl TargetQuality {
         // History of probe results as quantizer-score pairs
         let mut quantizer_score_history: Vec<(f32, f64)> = vec![];
 
-        let update_progress_bar = |next_quantizer: f32| {
+        let update_progress_bar = |current_probe: usize, next_quantizer: f32| {
             if let Some(worker_id) = worker_id {
-                update_mp_msg(
+                update_worker_progress_msg(
+                    verbosity,
                     worker_id,
-                    format!(
-                        "Targeting {metric} Quality {min}-{max} - Testing {quantizer}",
-                        metric = self.metric,
-                        min = target.0,
-                        max = target.1,
-                        quantizer = next_quantizer
-                    ),
+                    self.format_probe_status(chunk, target, current_probe, next_quantizer),
                 );
             }
         };
@@ -194,7 +209,8 @@ impl TargetQuality {
                 break;
             }
 
-            update_progress_bar(next_quantizer);
+            let current_probe = quantizer_score_history.len() + 1;
+            update_progress_bar(current_probe, next_quantizer);
 
             let score = {
                 let value = self.probe(chunk, next_quantizer, plugins)?;
@@ -1171,5 +1187,50 @@ mod tests {
                 case
             );
         }
+    }
+
+    #[test]
+    fn probe_status_message_includes_probe_details() {
+        use crate::{ChunkMethod, Input};
+
+        let mut target_quality = TargetQuality::default("/tmp", Encoder::svt_av1);
+        target_quality.target = Some((95.0, 96.0));
+        target_quality.probes = 6;
+        target_quality.metric = TargetMetric::VMAF;
+
+        let chunk = Chunk {
+            temp:                  "/tmp".to_owned(),
+            index:                 12,
+            input:                 Input::Video {
+                path:         "test.mkv".into(),
+                temp:         "/tmp".to_owned(),
+                chunk_method: ChunkMethod::Select,
+                is_proxy:     false,
+                cache_mode:   crate::vapoursynth::CacheSource::SOURCE,
+            },
+            proxy:                 None,
+            source_cmd:            vec![],
+            proxy_cmd:             None,
+            output_ext:            "ivf".to_owned(),
+            start_frame:           0,
+            end_frame:             5,
+            frame_rate:            30.0,
+            passes:                1,
+            video_params:          vec![],
+            encoder:               Encoder::svt_av1,
+            noise_size:            (None, None),
+            target_quality:        target_quality.clone(),
+            tq_cq:                 None,
+            ignore_frame_mismatch: false,
+        };
+
+        let msg = target_quality.format_probe_status(&chunk, (95.0, 96.0), 2, 37.0);
+
+        assert!(msg.contains("TQ"));
+        assert!(msg.contains("chunk 00012"));
+        assert!(msg.contains("VMAF"));
+        assert!(msg.contains("95-96"));
+        assert!(msg.contains("probe 2/6"));
+        assert!(msg.contains("Q=37"));
     }
 }

@@ -24,10 +24,10 @@ use crate::{
     get_done,
     progress_bar::{
         dec_bar,
-        inc_mp_bar,
+        inc_progress_bar_for_verbosity,
         update_mp_chunk,
-        update_mp_msg,
         update_progress_bar_estimates,
+        update_worker_progress_msg,
     },
     util::printable_base10_digits,
     Chunk,
@@ -220,7 +220,8 @@ impl Broker<'_> {
         update_mp_chunk(worker_id, chunk.index, padding);
 
         if let Some((min, max)) = chunk.target_quality.target {
-            update_mp_msg(
+            update_worker_progress_msg(
+                self.project.args.verbosity,
                 worker_id,
                 format!(
                     "Targeting {metric} Quality: {min}-{max}",
@@ -233,6 +234,7 @@ impl Broker<'_> {
                 let res = chunk.target_quality.per_shot_target_quality(
                     chunk,
                     Some(worker_id),
+                    self.project.args.verbosity,
                     self.project.args.vapoursynth_plugins,
                 );
                 match res {
@@ -277,7 +279,10 @@ impl Broker<'_> {
                         encode_dir.join(format!("{index:05}.{extension}", index = chunk.index));
                     std::fs::copy(&probe_file, &output_file)?;
 
-                    inc_mp_bar(chunk.frames() as u64);
+                    inc_progress_bar_for_verbosity(
+                        self.project.args.verbosity,
+                        chunk.frames() as u64,
+                    );
 
                     let progress_file = Path::new(&self.project.args.temp).join("done.json");
                     get_done().done.insert(chunk.name(), DoneChunk {

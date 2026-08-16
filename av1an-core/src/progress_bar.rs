@@ -272,9 +272,29 @@ pub fn update_mp_msg(worker_idx: usize, msg: String) {
     }
 }
 
+pub fn update_worker_progress_msg(verbosity: Verbosity, worker_idx: usize, msg: String) {
+    match verbosity {
+        Verbosity::Normal => {
+            if let Some(pb) = PROGRESS_BAR.get() {
+                pb.set_message(msg);
+            }
+        },
+        Verbosity::Verbose => update_mp_msg(worker_idx, msg),
+        Verbosity::Quiet => {},
+    }
+}
+
 pub fn inc_mp_bar(inc: u64) {
     if let Some((_, pbs)) = MULTI_PROGRESS_BAR.get() {
         pbs.last().expect("at least one progress bar exists").inc(inc);
+    }
+}
+
+pub fn inc_progress_bar_for_verbosity(verbosity: Verbosity, inc: u64) {
+    match verbosity {
+        Verbosity::Normal => inc_bar(inc),
+        Verbosity::Verbose => inc_mp_bar(inc),
+        Verbosity::Quiet => {},
     }
 }
 
@@ -323,5 +343,39 @@ pub fn update_progress_bar_estimates(
         update_bar_info(kbps, HumanBytes(est_size as u64), Some(chunks));
     } else if verbosity == Verbosity::Verbose {
         update_mp_bar_info(kbps, HumanBytes(est_size as u64), chunks);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use once_cell::sync::Lazy;
+
+    use super::*;
+
+    static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    #[test]
+    fn probe_reuse_progress_increments_once_in_normal_mode() {
+        let _guard = TEST_MUTEX.lock().expect("mutex should lock");
+        init_progress_bar(100, 0, Some((0, 1)));
+        reset_bar_at(0);
+
+        inc_progress_bar_for_verbosity(Verbosity::Normal, 7);
+        let position = PROGRESS_BAR.get().expect("progress bar should be initialized").position();
+        assert_eq!(position, 7);
+    }
+
+    #[test]
+    fn probe_reuse_progress_increments_once_in_verbose_mode() {
+        let _guard = TEST_MUTEX.lock().expect("mutex should lock");
+        init_multi_progress_bar(100, 1, 0, (0, 1));
+        reset_mp_bar_at(0);
+
+        inc_progress_bar_for_verbosity(Verbosity::Verbose, 7);
+        let (_, bars) = MULTI_PROGRESS_BAR.get().expect("multi progress bar should be initialized");
+        let position = bars.last().expect("aggregate progress bar should exist").position();
+        assert_eq!(position, 7);
     }
 }
