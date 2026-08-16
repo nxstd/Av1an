@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Stdio},
     str::FromStr,
+    sync::atomic::{AtomicU8, Ordering as AtomicOrdering},
     thread::{self, available_parallelism},
 };
 
@@ -155,6 +156,7 @@ impl TargetQuality {
         chunk: &Chunk,
         worker_id: Option<usize>,
         verbosity: Verbosity,
+        terminations_requested: Option<&AtomicU8>,
         plugins: Option<VapoursynthPlugins>,
     ) -> anyhow::Result<f32> {
         anyhow::ensure!(self.target.is_some(), "Target must be some");
@@ -208,6 +210,8 @@ impl TargetQuality {
                 skip_reason = SkipProbingReason::None;
                 break;
             }
+
+            ensure_target_quality_not_terminated(terminations_requested)?;
 
             let current_probe = quantizer_score_history.len() + 1;
             update_progress_bar(current_probe, next_quantizer);
@@ -899,6 +903,18 @@ impl TargetQuality {
     }
 }
 
+fn ensure_target_quality_not_terminated(
+    terminations_requested: Option<&AtomicU8>,
+) -> anyhow::Result<()> {
+    if terminations_requested.is_some_and(|terminations_requested| {
+        terminations_requested.load(AtomicOrdering::SeqCst) > 0
+    }) {
+        bail!("Termination requested during Target Quality");
+    }
+
+    Ok(())
+}
+
 #[expect(clippy::result_large_err)]
 fn build_encoder_pipe(
     cmd: &str,
@@ -1099,6 +1115,8 @@ pub fn log_probes(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicU8;
+
     use super::*;
 
     // Full algorithm simulation tests
@@ -1187,6 +1205,14 @@ mod tests {
                 case
             );
         }
+    }
+
+    #[test]
+    fn termination_between_probes_prevents_the_next_probe() {
+        let terminations_requested = AtomicU8::new(1);
+
+        assert!(ensure_target_quality_not_terminated(Some(&terminations_requested)).is_err());
+        assert!(ensure_target_quality_not_terminated(None).is_ok());
     }
 
     #[test]

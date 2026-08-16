@@ -109,6 +109,26 @@ impl Display for EncoderCrash {
     }
 }
 
+fn is_termination_requested(terminations_requested: &AtomicU8) -> bool {
+    terminations_requested.load(Ordering::SeqCst) > 0
+}
+
+fn can_finalize_target_quality(terminations_requested: &AtomicU8) -> bool {
+    !is_termination_requested(terminations_requested)
+}
+
+fn should_retry_target_quality(
+    terminations_requested: &AtomicU8,
+    current_try: usize,
+    max_tries: usize,
+) -> bool {
+    can_finalize_target_quality(terminations_requested) && current_try < max_tries
+}
+
+fn target_quality_needs_probing(chunk: &Chunk) -> bool {
+    chunk.target_quality.target.is_some() && chunk.tq_cq.is_none()
+}
+
 impl Broker<'_> {
     /// Main encoding loop. set_thread_affinity may be ignored if the value is
     /// invalid.
@@ -219,7 +239,11 @@ impl Broker<'_> {
         let padding = printable_base10_digits(self.chunk_queue.len() - 1) as usize;
         update_mp_chunk(worker_id, chunk.index, padding);
 
-        if let Some((min, max)) = chunk.target_quality.target {
+        if target_quality_needs_probing(chunk) {
+            let (min, max) = chunk
+                .target_quality
+                .target
+                .expect("Target Quality is configured when probing is required");
             update_worker_progress_msg(
                 self.project.args.verbosity,
                 worker_id,
@@ -235,6 +259,7 @@ impl Broker<'_> {
                     chunk,
                     Some(worker_id),
                     self.project.args.verbosity,
+                    Some(terminations_requested),
                     self.project.args.vapoursynth_plugins,
                 );
                 match res {
@@ -243,7 +268,18 @@ impl Broker<'_> {
                         break;
                     },
                     Err(e) => {
-                        if r#try >= self.project.args.max_tries {
+                        if !should_retry_target_quality(
+                            terminations_requested,
+                            r#try,
+                            self.project.args.max_tries,
+                        ) {
+                            if is_termination_requested(terminations_requested) {
+                                bail!(
+                                    "Termination requested during Target Quality. Skipping chunk \
+                                     {}",
+                                    chunk.index
+                                );
+                            }
                             bail!(
                                 "Target Quality failed after {} tries on chunk {}:\n{}",
                                 r#try,
@@ -253,6 +289,15 @@ impl Broker<'_> {
                         }
                     },
                 }
+            }
+        }
+
+        if chunk.target_quality.target.is_some() {
+            if !can_finalize_target_quality(terminations_requested) {
+                bail!(
+                    "Termination requested during Target Quality. Skipping chunk {}",
+                    chunk.index
+                );
             }
 
             if chunk.target_quality.params_copied
@@ -383,5 +428,84 @@ impl Broker<'_> {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicU8;
+
+    use super::*;
+    use crate::{vapoursynth, ChunkMethod, Encoder, Input, TargetQuality};
+
+    fn target_quality_chunk(tq_cq: Option<f32>) -> Chunk {
+        let mut target_quality = TargetQuality::default("/tmp", Encoder::svt_av1);
+        target_quality.target = Some((95.0, 96.0));
+
+        Chunk {
+            temp: "/tmp".to_owned(),
+            index: 12,
+            input: Input::Video {
+                path:         "test.mkv".into(),
+                temp:         "/tmp".to_owned(),
+                chunk_method: ChunkMethod::Select,
+                is_proxy:     false,
+                cache_mode:   vapoursynth::CacheSource::SOURCE,
+            },
+            proxy: None,
+            source_cmd: vec![],
+            proxy_cmd: None,
+            output_ext: "ivf".to_owned(),
+            start_frame: 0,
+            end_frame: 5,
+            frame_rate: 30.0,
+            passes: 1,
+            video_params: vec![],
+            encoder: Encoder::svt_av1,
+            noise_size: (None, None),
+            target_quality,
+            tq_cq,
+            ignore_frame_mismatch: false,
+        }
+    }
+
+    #[test]
+    fn target_quality_retries_normal_errors_before_the_retry_limit() {
+        let terminations_requested = AtomicU8::new(0);
+
+        assert!(should_retry_target_quality(&terminations_requested, 1, 3));
+        assert!(!should_retry_target_quality(&terminations_requested, 3, 3));
+    }
+
+    #[test]
+    fn target_quality_does_not_retry_after_termination() {
+        let terminations_requested = AtomicU8::new(1);
+
+        assert!(!should_retry_target_quality(&terminations_requested, 1, 3));
+        assert!(is_termination_requested(&terminations_requested));
+    }
+
+    #[test]
+    fn interrupted_target_quality_chunk_is_not_finalized() {
+        let terminations_requested = AtomicU8::new(1);
+
+        assert!(!can_finalize_target_quality(&terminations_requested));
+    }
+
+    #[test]
+    fn fresh_target_quality_chunks_require_worker_side_probing() {
+        assert!(target_quality_needs_probing(&target_quality_chunk(None)));
+    }
+
+    #[test]
+    fn persisted_target_quality_cq_skips_worker_side_probing() {
+        let mut old_chunk_json =
+            serde_json::to_value(target_quality_chunk(None)).expect("chunk should serialize");
+        old_chunk_json["per_shot_target_quality_cq"] = serde_json::json!(42.0);
+        let chunk: Chunk =
+            serde_json::from_value(old_chunk_json).expect("old chunk should deserialize");
+
+        assert_eq!(chunk.tq_cq, Some(42.0));
+        assert!(!target_quality_needs_probing(&chunk));
     }
 }
