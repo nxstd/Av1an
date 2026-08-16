@@ -109,6 +109,22 @@ impl Display for EncoderCrash {
     }
 }
 
+fn is_termination_requested(terminations_requested: &AtomicU8) -> bool {
+    terminations_requested.load(Ordering::SeqCst) > 0
+}
+
+fn can_finalize_target_quality(terminations_requested: &AtomicU8) -> bool {
+    !is_termination_requested(terminations_requested)
+}
+
+fn should_retry_target_quality(
+    terminations_requested: &AtomicU8,
+    current_try: usize,
+    max_tries: usize,
+) -> bool {
+    can_finalize_target_quality(terminations_requested) && current_try < max_tries
+}
+
 impl Broker<'_> {
     /// Main encoding loop. set_thread_affinity may be ignored if the value is
     /// invalid.
@@ -235,6 +251,7 @@ impl Broker<'_> {
                     chunk,
                     Some(worker_id),
                     self.project.args.verbosity,
+                    Some(terminations_requested),
                     self.project.args.vapoursynth_plugins,
                 );
                 match res {
@@ -243,7 +260,17 @@ impl Broker<'_> {
                         break;
                     },
                     Err(e) => {
-                        if r#try >= self.project.args.max_tries {
+                        if !should_retry_target_quality(
+                            terminations_requested,
+                            r#try,
+                            self.project.args.max_tries,
+                        ) {
+                            if is_termination_requested(terminations_requested) {
+                                bail!(
+                                    "Termination requested during Target Quality. Skipping chunk {}",
+                                    chunk.index
+                                );
+                            }
                             bail!(
                                 "Target Quality failed after {} tries on chunk {}:\n{}",
                                 r#try,
@@ -253,6 +280,13 @@ impl Broker<'_> {
                         }
                     },
                 }
+            }
+
+            if !can_finalize_target_quality(terminations_requested) {
+                bail!(
+                    "Termination requested during Target Quality. Skipping chunk {}",
+                    chunk.index
+                );
             }
 
             if chunk.target_quality.params_copied
@@ -383,5 +417,35 @@ impl Broker<'_> {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicU8;
+
+    use super::*;
+
+    #[test]
+    fn target_quality_retries_normal_errors_before_the_retry_limit() {
+        let terminations_requested = AtomicU8::new(0);
+
+        assert!(should_retry_target_quality(&terminations_requested, 1, 3));
+        assert!(!should_retry_target_quality(&terminations_requested, 3, 3));
+    }
+
+    #[test]
+    fn target_quality_does_not_retry_after_termination() {
+        let terminations_requested = AtomicU8::new(1);
+
+        assert!(!should_retry_target_quality(&terminations_requested, 1, 3));
+        assert!(is_termination_requested(&terminations_requested));
+    }
+
+    #[test]
+    fn interrupted_target_quality_chunk_is_not_finalized() {
+        let terminations_requested = AtomicU8::new(1);
+
+        assert!(!can_finalize_target_quality(&terminations_requested));
     }
 }
