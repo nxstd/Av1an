@@ -233,7 +233,7 @@ fn copy_ivf_payload(
     frame_index: u64,
 ) -> anyhow::Result<()> {
     let mut remaining = u64::from(payload_size);
-    let mut buffer = [0u8; 64 * 1024];
+    let mut buffer = vec![0u8; 64 * 1024];
     while remaining > 0 {
         let read_len =
             usize::try_from(remaining.min(buffer.len() as u64)).expect("buffer length fits usize");
