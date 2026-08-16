@@ -100,12 +100,15 @@ pub struct TargetQuality {
 impl TargetQuality {
     fn format_probe_status(
         &self,
+        chunk: &Chunk,
         target: (f64, f64),
         current_probe: usize,
         next_quantizer: f32,
     ) -> String {
         format!(
-            "TQ {metric} {min}-{max}: probe {current_probe}/{max_probes}, Q={next_quantizer}",
+            "TQ chunk {chunk:05}: {metric} {min}-{max}, probe {current_probe}/{max_probes}, \
+             Q={next_quantizer}",
+            chunk = chunk.index,
             metric = self.metric,
             min = target.0,
             max = target.1,
@@ -164,7 +167,7 @@ impl TargetQuality {
                 update_worker_progress_msg(
                     verbosity,
                     worker_id,
-                    self.format_probe_status(target, current_probe, next_quantizer),
+                    self.format_probe_status(chunk, target, current_probe, next_quantizer),
                 );
             }
         };
@@ -1188,14 +1191,43 @@ mod tests {
 
     #[test]
     fn probe_status_message_includes_probe_details() {
+        use crate::{ChunkMethod, Input};
+
         let mut target_quality = TargetQuality::default("/tmp", Encoder::svt_av1);
         target_quality.target = Some((95.0, 96.0));
         target_quality.probes = 6;
         target_quality.metric = TargetMetric::VMAF;
 
-        let msg = target_quality.format_probe_status((95.0, 96.0), 2, 37.0);
+        let chunk = Chunk {
+            temp:                  "/tmp".to_owned(),
+            index:                 12,
+            input:                 Input::Video {
+                path:         "test.mkv".into(),
+                temp:         "/tmp".to_owned(),
+                chunk_method: ChunkMethod::Select,
+                is_proxy:     false,
+                cache_mode:   crate::vapoursynth::CacheSource::SOURCE,
+            },
+            proxy:                 None,
+            source_cmd:            vec![],
+            proxy_cmd:             None,
+            output_ext:            "ivf".to_owned(),
+            start_frame:           0,
+            end_frame:             5,
+            frame_rate:            30.0,
+            passes:                1,
+            video_params:          vec![],
+            encoder:               Encoder::svt_av1,
+            noise_size:            (None, None),
+            target_quality:        target_quality.clone(),
+            tq_cq:                 None,
+            ignore_frame_mismatch: false,
+        };
+
+        let msg = target_quality.format_probe_status(&chunk, (95.0, 96.0), 2, 37.0);
 
         assert!(msg.contains("TQ"));
+        assert!(msg.contains("chunk 00012"));
         assert!(msg.contains("VMAF"));
         assert!(msg.contains("95-96"));
         assert!(msg.contains("probe 2/6"));

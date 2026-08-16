@@ -345,3 +345,45 @@ pub fn update_progress_bar_estimates(
         update_mp_bar_info(kbps, HumanBytes(est_size as u64), chunks);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use once_cell::sync::Lazy;
+
+    use super::*;
+
+    static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    #[test]
+    fn probe_reuse_progress_increments_once_in_normal_mode() {
+        let _guard = TEST_MUTEX.lock().expect("mutex should lock");
+        init_progress_bar(100, 0, Some((0, 1)));
+        reset_bar_at(0);
+
+        inc_progress_bar_for_verbosity(Verbosity::Normal, 7);
+        let position = PROGRESS_BAR
+            .get()
+            .expect("progress bar should be initialized")
+            .position();
+        assert_eq!(position, 7);
+    }
+
+    #[test]
+    fn probe_reuse_progress_increments_once_in_verbose_mode() {
+        let _guard = TEST_MUTEX.lock().expect("mutex should lock");
+        init_multi_progress_bar(100, 1, 0, (0, 1));
+        reset_mp_bar_at(0);
+
+        inc_progress_bar_for_verbosity(Verbosity::Verbose, 7);
+        let (_, bars) = MULTI_PROGRESS_BAR
+            .get()
+            .expect("multi progress bar should be initialized");
+        let position = bars
+            .last()
+            .expect("aggregate progress bar should exist")
+            .position();
+        assert_eq!(position, 7);
+    }
+}
