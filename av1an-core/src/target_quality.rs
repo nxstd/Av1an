@@ -2,6 +2,7 @@ use std::{
     borrow::Cow,
     cmp::{self, Ordering},
     collections::HashSet,
+    fs,
     io::Read,
     path::{Path, PathBuf},
     process::{Child, Stdio},
@@ -17,7 +18,7 @@ use tracing::{debug, trace};
 use crate::{
     broker::EncoderCrash,
     chunk::Chunk,
-    ffmpeg::FFPixelFormat,
+    ffmpeg::{get_num_frames, FFPixelFormat},
     interpol::{
         akima_interpolate,
         catmull_rom_interpolate,
@@ -571,7 +572,16 @@ impl TargetQuality {
         let source_cmd = chunk.proxy_cmd.clone().unwrap_or_else(|| chunk.source_cmd.clone());
         let (ff_cmd, output) = cmd.clone();
 
-        thread::scope(move |scope| -> Result<(), Box<EncoderCrash>> {
+        let extension = match self.encoder {
+            crate::encoder::Encoder::x264 => "264",
+            crate::encoder::Encoder::x265 => "hevc",
+            _ => "ivf",
+        };
+        let q_str = crate::encoder::format_q(q);
+        let probe_name = format!("v_{index:05}_{q_str}.{extension}", index = chunk.index);
+        let probe_path = std::path::Path::new(&chunk.temp).join("split").join(&probe_name);
+
+        let probe_result = thread::scope(move |scope| -> Result<(), Box<EncoderCrash>> {
             let mut source = if let [pipe_cmd, args @ ..] = &*source_cmd {
                 std::process::Command::new(pipe_cmd)
                     .args(args)
@@ -669,10 +679,25 @@ impl TargetQuality {
                 stdout:             String::new().into(),
             })?;
 
-            if let Some(source_pipe) = source_pipe.as_mut() {
-                let _ = source_pipe.wait();
-            };
-            let _ = source.wait();
+            let source_pipe_status = source_pipe
+                .as_mut()
+                .map(|source_pipe| {
+                    source_pipe.wait().map_err(|e| EncoderCrash {
+                        exit_status:        std::process::ExitStatus::default(),
+                        source_pipe_stderr: String::new().into(),
+                        ffmpeg_pipe_stderr: None,
+                        stderr:             format!("Failed to wait for intermediate ffmpeg: {e}").into(),
+                        stdout:             String::new().into(),
+                    })
+                })
+                .transpose()?;
+            let source_status = source.wait().map_err(|e| EncoderCrash {
+                exit_status:        std::process::ExitStatus::default(),
+                source_pipe_stderr: format!("Failed to wait for source: {e}").into(),
+                ffmpeg_pipe_stderr: None,
+                stderr:             String::new().into(),
+                stdout:             String::new().into(),
+            })?;
 
             // Collect stderr after process finishes
             let stderr_handles = (
@@ -681,29 +706,71 @@ impl TargetQuality {
                 stderr_thread3.join().unwrap_or_default(),
             );
 
-            if !enc_status.success() {
+            if !enc_status.success()
+                || source_pipe_status.as_ref().is_some_and(|status| !status.success())
+                || !source_status.success()
+            {
+                let exit_status = if !enc_status.success() {
+                    enc_status.clone()
+                } else if source_pipe_status.as_ref().is_some_and(|status| !status.success())
+                {
+                    source_pipe_status
+                        .as_ref()
+                        .expect("source pipe status was checked")
+                        .clone()
+                } else {
+                    source_status.clone()
+                };
                 return Err(Box::new(EncoderCrash {
-                    exit_status:        enc_status,
+                    exit_status,
                     source_pipe_stderr: stderr_handles.0.into(),
                     ffmpeg_pipe_stderr: stderr_handles.1.map(|h| h.into()),
                     stderr:             stderr_handles.2.into(),
-                    stdout:             String::new().into(),
+                    stdout:             format!(
+                        "source exit status: {source_status}; intermediate ffmpeg exit status: {};
+                         encoder exit status: {enc_status}",
+                        source_pipe_status.map_or_else(|| "not used".to_string(), |status| status.to_string())
+                    )
+                    .into(),
                 }));
             }
 
             Ok(())
-        })?;
+        });
 
-        let extension = match self.encoder {
-            crate::encoder::Encoder::x264 => "264",
-            crate::encoder::Encoder::x265 => "hevc",
-            _ => "ivf",
-        };
+        if let Err(error) = probe_result {
+            let _ = fs::remove_file(&probe_path);
+            return Err(error);
+        }
 
-        let q_str = crate::encoder::format_q(q);
-        let probe_name = format!("v_{index:05}_{q_str}.{extension}", index = chunk.index);
+        if self.probing_rate == 1 {
+            let actual_frames = match get_num_frames(&probe_path) {
+                Ok(actual_frames) => actual_frames,
+                Err(error) => {
+                    let _ = fs::remove_file(&probe_path);
+                    return Err(Box::new(EncoderCrash {
+                    exit_status:        std::process::ExitStatus::default(),
+                    source_pipe_stderr: String::new().into(),
+                    ffmpeg_pipe_stderr: None,
+                    stderr:             format!("Failed to count probe frames: {error}").into(),
+                    stdout:             String::new().into(),
+                    }));
+                },
+            };
+            if let Err(error) = validate_full_rate_probe_frame_count(chunk.frames(), actual_frames)
+            {
+                let _ = fs::remove_file(&probe_path);
+                return Err(Box::new(EncoderCrash {
+                    exit_status:        std::process::ExitStatus::default(),
+                    source_pipe_stderr: String::new().into(),
+                    ffmpeg_pipe_stderr: None,
+                    stderr:             error.to_string().into(),
+                    stdout:             String::new().into(),
+                }));
+            }
+        }
 
-        Ok(std::path::Path::new(&chunk.temp).join("split").join(&probe_name))
+        Ok(probe_path)
     }
 
     #[inline]
@@ -912,6 +979,18 @@ fn ensure_target_quality_not_hard_shutdown(
         bail!("Hard shutdown requested during Target Quality");
     }
 
+    Ok(())
+}
+
+pub(crate) fn validate_full_rate_probe_frame_count(
+    expected_frames: usize,
+    actual_frames: usize,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        actual_frames == expected_frames,
+        "FRAME MISMATCH: Target Quality probe has {actual_frames}/{expected_frames} \
+         (actual/expected frames)"
+    );
     Ok(())
 }
 
@@ -1222,6 +1301,19 @@ mod tests {
         let terminations_requested = AtomicU8::new(2);
 
         assert!(ensure_target_quality_not_hard_shutdown(Some(&terminations_requested)).is_err());
+    }
+
+    #[test]
+    fn full_rate_probe_with_expected_frame_count_is_accepted() {
+        assert!(validate_full_rate_probe_frame_count(57, 57).is_ok());
+    }
+
+    #[test]
+    fn full_rate_probe_with_too_few_frames_is_rejected() {
+        let error =
+            validate_full_rate_probe_frame_count(57, 11).expect_err("truncated probe must fail");
+
+        assert!(error.to_string().contains("11/57"));
     }
 
     #[test]
