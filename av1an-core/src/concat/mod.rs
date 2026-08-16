@@ -4,23 +4,16 @@ mod tests;
 use std::{
     fmt::{Display, Write as FmtWrite},
     fs::{self, DirEntry, File},
-    io::Write,
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::Arc,
 };
 
 use anyhow::{anyhow, Context};
-use av_format::{
-    buffer::AccReader,
-    demuxer::{Context as DemuxerContext, Event},
-    muxer::{Context as MuxerContext, Writer},
-    rational::Rational64,
-};
-use av_ivf::{demuxer::IvfDemuxer, muxer::IvfMuxer};
+use av_format::rational::Rational64;
 use path_abs::{PathAbs, PathInfo};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, warn};
 
 use crate::{encoder::Encoder, util::read_in_dir};
 
@@ -64,90 +57,191 @@ pub fn sort_files_by_filename(files: &mut [PathBuf]) {
     });
 }
 
+#[derive(Debug)]
+struct IvfHeader {
+    bytes:  Vec<u8>,
+    fourcc: [u8; 4],
+    width:  u16,
+    height: u16,
+    rate:   u32,
+    scale:  u32,
+}
+
 #[tracing::instrument(level = "debug")]
 pub fn ivf(input: &Path, out: &Path) -> anyhow::Result<()> {
     let mut files: Vec<PathBuf> = read_in_dir(input)?.collect();
 
     sort_files_by_filename(&mut files);
+    anyhow::ensure!(!files.is_empty(), "No IVF chunks found in {}", input.display());
 
-    assert!(!files.is_empty());
+    let result = (|| {
+        let mut first_input = File::open(&files[0])
+            .with_context(|| format!("Failed to open IVF chunk {}", files[0].display()))?;
+        let first_header = read_ivf_header(&mut first_input, &files[0])?;
+        let mut output = File::create(out)
+            .with_context(|| format!("Failed to create IVF output {}", out.display()))?;
+        output.write_all(&first_header.bytes)?;
 
-    let output = File::create(out)?;
-
-    let mut muxer = MuxerContext::new(IvfMuxer::new(), Writer::new(output));
-
-    let global_info = {
-        let acc = AccReader::new(std::fs::File::open(&files[0])?);
-        let mut demuxer = DemuxerContext::new(IvfDemuxer::new(), acc);
-
-        demuxer.read_headers()?;
-
-        // attempt to set the duration correctly
-        let duration = demuxer.info.duration.unwrap_or(0)
-            + files.iter().skip(1).try_fold(0u64, |sum, file| -> anyhow::Result<_> {
-                let acc = AccReader::new(std::fs::File::open(file)?);
-                let mut demuxer = DemuxerContext::new(IvfDemuxer::new(), acc);
-
-                demuxer.read_headers()?;
-                Ok(sum + demuxer.info.duration.unwrap_or(0))
-            })?;
-
-        let mut info = demuxer.info;
-        info.duration = Some(duration);
-        info
-    };
-
-    muxer.set_global_info(global_info)?;
-
-    muxer.configure()?;
-    muxer.write_header()?;
-
-    let mut pos_offset: usize = 0;
-    for file in &files {
-        let mut last_pos: usize = 0;
-        let input = std::fs::File::open(file)?;
-
-        let acc = AccReader::new(input);
-
-        let mut demuxer = DemuxerContext::new(IvfDemuxer::new(), acc);
-        demuxer.read_headers()?;
-
-        trace!("global info: {:#?}", demuxer.info);
-
-        loop {
-            match demuxer.read_event() {
-                Ok(event) => match event {
-                    Event::MoreDataNeeded(sz) => panic!("needed more data: {sz} bytes"),
-                    Event::NewStream(s) => panic!("new stream: {s:?}"),
-                    Event::NewPacket(mut packet) => {
-                        if let Some(p) = packet.pos.as_mut() {
-                            last_pos = *p;
-                            *p += pos_offset;
-                        }
-
-                        trace!("received packet with pos: {:?}", packet.pos);
-                        muxer.write_packet(Arc::new(packet))?;
-                    },
-                    Event::Continue => {
-                        // do nothing
-                    },
-                    Event::Eof => {
-                        trace!("EOF received.");
-                        break;
-                    },
-                    _ => unimplemented!(),
-                },
-                Err(e) => {
-                    error!("{:?}", e);
-                    break;
-                },
+        let mut frame_count = 0u64;
+        let mut pos_offset = 0u64;
+        for (file_index, file) in files.iter().enumerate() {
+            let mut input = File::open(file)
+                .with_context(|| format!("Failed to open IVF chunk {}", file.display()))?;
+            let header = read_ivf_header(&mut input, file)?;
+            if file_index != 0 {
+                validate_compatible_ivf_header(&first_header, &header, file)?;
             }
+
+            let mut last_local_timestamp = 0u64;
+            let mut frame_index = 0u64;
+            while let Some(frame_header) = read_ivf_frame_header(&mut input, file)? {
+                let payload_size =
+                    u32::from_le_bytes(frame_header[..4].try_into().expect("slice length"));
+                let local_timestamp =
+                    u64::from_le_bytes(frame_header[4..].try_into().expect("slice length"));
+                let output_timestamp = local_timestamp.checked_add(pos_offset).ok_or_else(|| {
+                    anyhow!(
+                        "IVF timestamp overflow in {} at frame {}",
+                        file.display(),
+                        frame_index
+                    )
+                })?;
+
+                output.write_all(&payload_size.to_le_bytes())?;
+                output.write_all(&output_timestamp.to_le_bytes())?;
+                copy_ivf_payload(&mut input, &mut output, payload_size, file, frame_index)?;
+
+                last_local_timestamp = local_timestamp;
+                frame_index += 1;
+                frame_count = frame_count
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow!("IVF frame count overflow"))?;
+            }
+            pos_offset = pos_offset
+                .checked_add(last_local_timestamp)
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| anyhow!("IVF timestamp offset overflow after {}", file.display()))?;
         }
-        pos_offset += last_pos + 1;
+
+        let frame_count =
+            u32::try_from(frame_count).map_err(|_| anyhow!("IVF frame count exceeds u32"))?;
+        output.seek(SeekFrom::Start(24))?;
+        output.write_all(&frame_count.to_le_bytes())?;
+        output.flush()?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(out);
     }
+    result
+}
 
-    muxer.write_trailer()?;
+fn read_ivf_header(reader: &mut File, path: &Path) -> anyhow::Result<IvfHeader> {
+    let mut fixed_header = [0u8; 32];
+    reader
+        .read_exact(&mut fixed_header)
+        .with_context(|| format!("IVF header shorter than 32 bytes in {}", path.display()))?;
+    anyhow::ensure!(
+        &fixed_header[..4] == b"DKIF",
+        "Invalid IVF magic in {}",
+        path.display()
+    );
 
+    let header_length = usize::from(u16::from_le_bytes(
+        fixed_header[6..8].try_into().expect("slice length"),
+    ));
+    anyhow::ensure!(
+        header_length >= fixed_header.len(),
+        "Invalid IVF header length {} in {}",
+        header_length,
+        path.display()
+    );
+
+    let mut bytes = vec![0; header_length];
+    bytes[..fixed_header.len()].copy_from_slice(&fixed_header);
+    reader
+        .read_exact(&mut bytes[fixed_header.len()..])
+        .with_context(|| format!("Truncated extended IVF header in {}", path.display()))?;
+
+    Ok(IvfHeader {
+        fourcc: fixed_header[8..12].try_into().expect("slice length"),
+        width: u16::from_le_bytes(fixed_header[12..14].try_into().expect("slice length")),
+        height: u16::from_le_bytes(fixed_header[14..16].try_into().expect("slice length")),
+        rate: u32::from_le_bytes(fixed_header[16..20].try_into().expect("slice length")),
+        scale: u32::from_le_bytes(fixed_header[20..24].try_into().expect("slice length")),
+        bytes,
+    })
+}
+
+fn validate_compatible_ivf_header(
+    first: &IvfHeader,
+    current: &IvfHeader,
+    path: &Path,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(first.fourcc == current.fourcc, "Incompatible IVF FourCC in {}", path.display());
+    anyhow::ensure!(
+        first.width == current.width && first.height == current.height,
+        "Incompatible IVF dimensions in {}",
+        path.display()
+    );
+    anyhow::ensure!(
+        first.rate == current.rate && first.scale == current.scale,
+        "Incompatible IVF rate/scale in {}",
+        path.display()
+    );
+    Ok(())
+}
+
+fn read_ivf_frame_header(reader: &mut File, path: &Path) -> anyhow::Result<Option<[u8; 12]>> {
+    let mut header = [0u8; 12];
+    let mut read = 0;
+    while read < header.len() {
+        let bytes_read = reader
+            .read(&mut header[read..])
+            .with_context(|| format!("Failed to read IVF frame header in {}", path.display()))?;
+        if bytes_read == 0 {
+            if read == 0 {
+                return Ok(None);
+            }
+            anyhow::bail!(
+                "Truncated IVF frame header in {}: got {}/{} bytes",
+                path.display(),
+                read,
+                header.len()
+            );
+        }
+        read += bytes_read;
+    }
+    Ok(Some(header))
+}
+
+fn copy_ivf_payload(
+    input: &mut File,
+    output: &mut File,
+    payload_size: u32,
+    path: &Path,
+    frame_index: u64,
+) -> anyhow::Result<()> {
+    let mut remaining = u64::from(payload_size);
+    let mut buffer = [0u8; 64 * 1024];
+    while remaining > 0 {
+        let read_len = usize::try_from(remaining.min(buffer.len() as u64))
+            .expect("buffer length fits usize");
+        let bytes_read = input
+            .read(&mut buffer[..read_len])
+            .with_context(|| format!("Failed to read IVF payload in {}", path.display()))?;
+        if bytes_read == 0 {
+            anyhow::bail!(
+                "Truncated IVF payload in {} at frame {}: expected {} bytes",
+                path.display(),
+                frame_index,
+                payload_size
+            );
+        }
+        output.write_all(&buffer[..bytes_read])?;
+        remaining -= bytes_read as u64;
+    }
     Ok(())
 }
 
