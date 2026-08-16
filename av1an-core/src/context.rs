@@ -1066,23 +1066,16 @@ impl Av1anContext {
         frame_rate: f64,
         overrides: Option<ZoneOptions>,
     ) -> anyhow::Result<Chunk> {
-        let mut chunk = self.create_select_chunk(
-            index,
-            input,
-            start_frame,
-            end_frame,
-            frame_rate,
-            overrides,
-        )?;
+        let mut chunk =
+            self.create_select_chunk(index, input, start_frame, end_frame, frame_rate, overrides)?;
         let filter_index = chunk
             .source_cmd
             .iter()
             .position(|arg| arg == "-vf")
             .expect("select chunk source command should contain a video filter");
-        chunk.source_cmd[filter_index + 1] = format!(
-            "trim=start_frame={start_frame}:end_frame={end_frame},setpts=PTS-STARTPTS"
-        )
-        .into();
+        chunk.source_cmd[filter_index + 1] =
+            format!("trim=start_frame={start_frame}:end_frame={end_frame},setpts=PTS-STARTPTS")
+                .into();
         Ok(chunk)
     }
 
@@ -1380,7 +1373,8 @@ impl Av1anContext {
                         warn!(
                             "Hybrid chunk {index:05} [{}, {}) crosses physical segment boundary \
                              {}; using original input for this chunk",
-                            scene.start_frame, scene.end_frame,
+                            scene.start_frame,
+                            scene.end_frame,
                             boundary.expect("fallback scene should cross a physical boundary"),
                         );
                         self.create_hybrid_fallback_chunk(
@@ -1947,14 +1941,7 @@ mod tests {
 
         for (start_frame, end_frame, expected_frames) in [(10769, 10809, 40), (10809, 10866, 57)] {
             let chunk = context
-                .create_hybrid_fallback_chunk(
-                    0,
-                    input,
-                    start_frame,
-                    end_frame,
-                    24.0,
-                    None,
-                )
+                .create_hybrid_fallback_chunk(0, input, start_frame, end_frame, 24.0, None)
                 .expect("fallback chunk should be created");
             let filter_index = chunk
                 .source_cmd
@@ -1968,9 +1955,7 @@ mod tests {
             assert_eq!(chunk.frames(), expected_frames);
             assert_eq!(
                 chunk.source_cmd[filter_index + 1].to_string_lossy(),
-                format!(
-                    "trim=start_frame={start_frame}:end_frame={end_frame},setpts=PTS-STARTPTS"
-                )
+                format!("trim=start_frame={start_frame}:end_frame={end_frame},setpts=PTS-STARTPTS")
             );
         }
     }
