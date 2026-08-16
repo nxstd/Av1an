@@ -498,9 +498,8 @@ mod tests {
 
     #[test]
     fn persisted_target_quality_cq_skips_worker_side_probing() {
-        let old_chunk_json = serde_json::to_value(target_quality_chunk(None))
-            .expect("chunk should serialize");
-        let mut old_chunk_json = old_chunk_json;
+        let mut old_chunk_json =
+            serde_json::to_value(target_quality_chunk(None)).expect("chunk should serialize");
         old_chunk_json["per_shot_target_quality_cq"] = serde_json::json!(42.0);
         let chunk: Chunk =
             serde_json::from_value(old_chunk_json).expect("old chunk should deserialize");
