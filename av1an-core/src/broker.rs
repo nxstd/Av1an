@@ -26,8 +26,8 @@ use crate::{
         dec_bar,
         inc_progress_bar_for_verbosity,
         update_mp_chunk,
-        update_worker_progress_msg,
         update_progress_bar_estimates,
+        update_worker_progress_msg,
     },
     util::printable_base10_digits,
     Chunk,
@@ -279,7 +279,10 @@ impl Broker<'_> {
                         encode_dir.join(format!("{index:05}.{extension}", index = chunk.index));
                     std::fs::copy(&probe_file, &output_file)?;
 
-                    inc_progress_bar_for_verbosity(self.project.args.verbosity, chunk.frames() as u64);
+                    inc_progress_bar_for_verbosity(
+                        self.project.args.verbosity,
+                        chunk.frames() as u64,
+                    );
 
                     let progress_file = Path::new(&self.project.args.temp).join("done.json");
                     get_done().done.insert(chunk.name(), DoneChunk {
