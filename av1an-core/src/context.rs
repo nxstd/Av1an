@@ -203,7 +203,11 @@ impl Av1anContext {
                 target_quality
             }
 
-            fn build_context(temp: &Path, resume: bool, target_quality: TargetQuality) -> Av1anContext {
+            fn build_context(
+                temp: &Path,
+                resume: bool,
+                target_quality: TargetQuality,
+            ) -> Av1anContext {
                 let input = Input::Video {
                     path:         test_input_path(),
                     temp:         temp.to_string_lossy().to_string(),
@@ -280,28 +284,28 @@ impl Av1anContext {
 
             fn make_chunk(temp: &Path, index: usize, target_quality: &TargetQuality) -> Chunk {
                 Chunk {
-                    temp:                  temp.to_string_lossy().to_string(),
+                    temp: temp.to_string_lossy().to_string(),
                     index,
-                    input:                 Input::Video {
+                    input: Input::Video {
                         path:         test_input_path(),
                         temp:         temp.to_string_lossy().to_string(),
                         chunk_method: ChunkMethod::Select,
                         is_proxy:     false,
                         cache_mode:   crate::vapoursynth::CacheSource::SOURCE,
                     },
-                    proxy:                 None,
-                    source_cmd:            vec!["ffmpeg".into()],
-                    proxy_cmd:             None,
-                    output_ext:            "ivf".to_string(),
-                    start_frame:           index * 10,
-                    end_frame:             index * 10 + 10,
-                    frame_rate:            24.0,
-                    passes:                1,
-                    video_params:          vec![],
-                    encoder:               Encoder::aom,
-                    noise_size:            (None, None),
-                    target_quality:        target_quality.clone(),
-                    tq_cq:                 None,
+                    proxy: None,
+                    source_cmd: vec!["ffmpeg".into()],
+                    proxy_cmd: None,
+                    output_ext: "ivf".to_string(),
+                    start_frame: index * 10,
+                    end_frame: index * 10 + 10,
+                    frame_rate: 24.0,
+                    passes: 1,
+                    video_params: vec![],
+                    encoder: Encoder::aom,
+                    noise_size: (None, None),
+                    target_quality: target_quality.clone(),
+                    tq_cq: None,
                     ignore_frame_mismatch: false,
                 }
             }
@@ -316,13 +320,13 @@ impl Av1anContext {
                 let context = build_context(temp.path(), false, target_quality);
                 let scenes = vec![
                     Scene {
-                        start_frame: 0,
-                        end_frame: 5,
+                        start_frame:    0,
+                        end_frame:      5,
                         zone_overrides: None,
                     },
                     Scene {
-                        start_frame: 5,
-                        end_frame: 10,
+                        start_frame:    5,
+                        end_frame:      10,
                         zone_overrides: None,
                     },
                 ];
@@ -351,14 +355,15 @@ impl Av1anContext {
 
                 save_chunk_queue(temp.path().to_string_lossy().as_ref(), &queue)
                     .expect("chunk queue should serialize");
-                let chunk_json =
-                    fs::read_to_string(temp.path().join("chunks.json")).expect("chunks.json should exist");
+                let chunk_json = fs::read_to_string(temp.path().join("chunks.json"))
+                    .expect("chunks.json should exist");
                 assert_eq!(
                     chunk_json.matches("\"per_shot_target_quality_cq\":null").count(),
                     queue.len()
                 );
 
-                let reloaded = read_chunk_queue(temp.path()).expect("chunk queue should deserialize");
+                let reloaded =
+                    read_chunk_queue(temp.path()).expect("chunk queue should deserialize");
                 assert!(reloaded.iter().all(|chunk| chunk.tq_cq.is_none()));
             }
 
@@ -383,9 +388,8 @@ impl Av1anContext {
                 });
 
                 let context = build_context(temp.path(), true, target_quality);
-                let (remaining, total_chunks) = context
-                    .load_or_gen_chunk_queue(&[])
-                    .expect("resume queue should load");
+                let (remaining, total_chunks) =
+                    context.load_or_gen_chunk_queue(&[]).expect("resume queue should load");
 
                 assert_eq!(total_chunks, 3);
                 assert_eq!(remaining.len(), 2);

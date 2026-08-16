@@ -363,10 +363,7 @@ mod tests {
         reset_bar_at(0);
 
         inc_progress_bar_for_verbosity(Verbosity::Normal, 7);
-        let position = PROGRESS_BAR
-            .get()
-            .expect("progress bar should be initialized")
-            .position();
+        let position = PROGRESS_BAR.get().expect("progress bar should be initialized").position();
         assert_eq!(position, 7);
     }
 
@@ -377,13 +374,8 @@ mod tests {
         reset_mp_bar_at(0);
 
         inc_progress_bar_for_verbosity(Verbosity::Verbose, 7);
-        let (_, bars) = MULTI_PROGRESS_BAR
-            .get()
-            .expect("multi progress bar should be initialized");
-        let position = bars
-            .last()
-            .expect("aggregate progress bar should exist")
-            .position();
+        let (_, bars) = MULTI_PROGRESS_BAR.get().expect("multi progress bar should be initialized");
+        let position = bars.last().expect("aggregate progress bar should exist").position();
         assert_eq!(position, 7);
     }
 }
