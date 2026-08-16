@@ -143,281 +143,6 @@ impl Av1anContext {
             }
         }
 
-        #[cfg(test)]
-        mod tests {
-            use std::{
-                path::{Path, PathBuf},
-                sync::{
-                    atomic::{AtomicBool, AtomicUsize, Ordering},
-                    Mutex,
-                },
-            };
-
-            use dashmap::DashMap;
-            use once_cell::sync::Lazy;
-            use tempfile::tempdir;
-
-            use super::*;
-            use crate::{
-                ffmpeg::FFPixelFormat,
-                scenes::Scene,
-                settings::{InputPixelFormat, PixelFormat},
-                ChunkOrdering,
-                DoneChunk,
-                DoneJson,
-                Encoder,
-                Input,
-                ProbingStatistic,
-                ProbingStatisticName,
-                SplitMethod,
-                TargetQuality,
-                Verbosity,
-            };
-
-            static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
-
-            fn test_input_path() -> PathBuf {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("test-files")
-                    .join("blank_1080p.mkv")
-            }
-
-            fn reset_done_state(frames: usize) {
-                let done = init_done(DoneJson {
-                    frames:     AtomicUsize::new(frames),
-                    done:       DashMap::new(),
-                    audio_done: AtomicBool::new(false),
-                });
-                done.frames.store(frames, Ordering::Relaxed);
-                done.done.clear();
-                done.audio_done.store(false, Ordering::Relaxed);
-            }
-
-            fn build_target_quality(temp: &str) -> TargetQuality {
-                let mut target_quality = TargetQuality::default(temp, Encoder::aom);
-                target_quality.target = Some((95.0, 96.0));
-                target_quality.probing_statistic = ProbingStatistic {
-                    name:  ProbingStatisticName::Automatic,
-                    value: None,
-                };
-                target_quality
-            }
-
-            fn build_context(
-                temp: &Path,
-                resume: bool,
-                target_quality: TargetQuality,
-            ) -> Av1anContext {
-                let input = Input::Video {
-                    path:         test_input_path(),
-                    temp:         temp.to_string_lossy().to_string(),
-                    chunk_method: ChunkMethod::Select,
-                    is_proxy:     false,
-                    cache_mode:   crate::vapoursynth::CacheSource::SOURCE,
-                };
-
-                let args = EncodeArgs {
-                    input,
-                    proxy: None,
-                    temp: temp.to_string_lossy().to_string(),
-                    output_file: temp.join("out.ivf").to_string_lossy().to_string(),
-                    chunk_method: ChunkMethod::Select,
-                    chunk_order: ChunkOrdering::Sequential,
-                    scaler: String::new(),
-                    scenes: None,
-                    split_method: SplitMethod::None,
-                    sc_pix_format: None,
-                    sc_method: crate::ScenecutMethod::Standard,
-                    sc_only: false,
-                    sc_downscale_height: None,
-                    extra_splits_len: None,
-                    min_scene_len: 12,
-                    force_keyframes: Vec::new(),
-                    ignore_frame_mismatch: false,
-                    max_tries: 1,
-                    passes: 1,
-                    video_params: Vec::new(),
-                    tiles: (1, 1),
-                    encoder: Encoder::aom,
-                    workers: 1,
-                    set_thread_affinity: None,
-                    photon_noise: None,
-                    photon_noise_size: (None, None),
-                    chroma_noise: false,
-                    zones: None,
-                    cache_mode: crate::vapoursynth::CacheSource::SOURCE,
-                    pix_format_converter: crate::PixelFormatConverter::FFMPEG,
-                    ffmpeg_filter_args: Vec::new(),
-                    audio_params: Vec::new(),
-                    input_pix_format: InputPixelFormat::FFmpeg {
-                        format: FFPixelFormat::YUV420P10LE,
-                    },
-                    output_pix_format: PixelFormat {
-                        format:    FFPixelFormat::YUV420P10LE,
-                        bit_depth: 10,
-                    },
-                    verbosity: Verbosity::Normal,
-                    resume,
-                    keep: true,
-                    force: true,
-                    no_defaults: true,
-                    tile_auto: false,
-                    concat: crate::ConcatMethod::FFmpeg,
-                    target_quality,
-                    vmaf: false,
-                    vmaf_path: None,
-                    vmaf_res: "1920x1080".to_string(),
-                    probe_res: None,
-                    vmaf_threads: None,
-                    vmaf_filter: None,
-                    vapoursynth_plugins: None,
-                };
-
-                Av1anContext {
-                    frames: 10,
-                    vs_script: None,
-                    vs_proxy_script: None,
-                    args,
-                    scene_factory: SceneFactory::new(),
-                }
-            }
-
-            fn make_chunk(temp: &Path, index: usize, target_quality: &TargetQuality) -> Chunk {
-                Chunk {
-                    temp: temp.to_string_lossy().to_string(),
-                    index,
-                    input: Input::Video {
-                        path:         test_input_path(),
-                        temp:         temp.to_string_lossy().to_string(),
-                        chunk_method: ChunkMethod::Select,
-                        is_proxy:     false,
-                        cache_mode:   crate::vapoursynth::CacheSource::SOURCE,
-                    },
-                    proxy: None,
-                    source_cmd: vec!["ffmpeg".into()],
-                    proxy_cmd: None,
-                    output_ext: "ivf".to_string(),
-                    start_frame: index * 10,
-                    end_frame: index * 10 + 10,
-                    frame_rate: 24.0,
-                    passes: 1,
-                    video_params: vec![],
-                    encoder: Encoder::aom,
-                    noise_size: (None, None),
-                    target_quality: target_quality.clone(),
-                    tq_cq: None,
-                    ignore_frame_mismatch: false,
-                }
-            }
-
-            #[test]
-            fn queue_construction_with_target_quality_keeps_tq_cq_none() {
-                let _guard = TEST_MUTEX.lock().expect("mutex should lock");
-                let temp = tempdir().expect("temp dir should be created");
-                reset_done_state(0);
-
-                let target_quality = build_target_quality(temp.path().to_string_lossy().as_ref());
-                let context = build_context(temp.path(), false, target_quality);
-                let scenes = vec![
-                    Scene {
-                        start_frame:    0,
-                        end_frame:      5,
-                        zone_overrides: None,
-                    },
-                    Scene {
-                        start_frame:    5,
-                        end_frame:      10,
-                        zone_overrides: None,
-                    },
-                ];
-
-                let queue = context
-                    .create_video_queue_select(&scenes)
-                    .expect("queue construction should succeed");
-
-                assert_eq!(queue.len(), 2);
-                assert!(queue.iter().all(|chunk| chunk.target_quality.target.is_some()));
-                assert!(queue.iter().all(|chunk| chunk.tq_cq.is_none()));
-            }
-
-            #[test]
-            fn chunk_queue_serialization_preserves_null_tq_cq() {
-                let _guard = TEST_MUTEX.lock().expect("mutex should lock");
-                let temp = tempdir().expect("temp dir should be created");
-                reset_done_state(0);
-
-                let target_quality = build_target_quality(temp.path().to_string_lossy().as_ref());
-                let queue = vec![
-                    make_chunk(temp.path(), 1, &target_quality),
-                    make_chunk(temp.path(), 2, &target_quality),
-                    make_chunk(temp.path(), 3, &target_quality),
-                ];
-
-                save_chunk_queue(temp.path().to_string_lossy().as_ref(), &queue)
-                    .expect("chunk queue should serialize");
-                let chunk_json = fs::read_to_string(temp.path().join("chunks.json"))
-                    .expect("chunks.json should exist");
-                assert_eq!(
-                    chunk_json.matches("\"per_shot_target_quality_cq\":null").count(),
-                    queue.len()
-                );
-
-                let reloaded =
-                    read_chunk_queue(temp.path()).expect("chunk queue should deserialize");
-                assert!(reloaded.iter().all(|chunk| chunk.tq_cq.is_none()));
-            }
-
-            #[test]
-            fn resume_filtering_keeps_unfinished_target_quality_chunks() {
-                let _guard = TEST_MUTEX.lock().expect("mutex should lock");
-                let temp = tempdir().expect("temp dir should be created");
-                reset_done_state(30);
-
-                let target_quality = build_target_quality(temp.path().to_string_lossy().as_ref());
-                let queue = vec![
-                    make_chunk(temp.path(), 1, &target_quality),
-                    make_chunk(temp.path(), 2, &target_quality),
-                    make_chunk(temp.path(), 3, &target_quality),
-                ];
-                save_chunk_queue(temp.path().to_string_lossy().as_ref(), &queue)
-                    .expect("chunk queue should serialize");
-
-                get_done().done.insert(queue[0].name(), DoneChunk {
-                    frames:     queue[0].frames(),
-                    size_bytes: 128,
-                });
-                fs::write(
-                    temp.path().join("done.json"),
-                    serde_json::to_string(get_done()).expect("done state should serialize"),
-                )
-                .expect("done.json should be written");
-
-                let persisted_done: DoneJson = serde_json::from_str(
-                    &fs::read_to_string(temp.path().join("done.json"))
-                        .expect("done.json should be readable"),
-                )
-                .expect("done.json should deserialize");
-                assert!(persisted_done.done.contains_key(&queue[0].name()));
-
-                let context = build_context(temp.path(), true, target_quality);
-                let (remaining, total_chunks) =
-                    context.load_or_gen_chunk_queue(&[]).expect("resume queue should load");
-
-                assert_eq!(total_chunks, 3);
-                assert_eq!(remaining.len(), 2);
-                assert!(!remaining.iter().any(|chunk| chunk.index == 1));
-                assert!(remaining.iter().any(|chunk| chunk.index == 2));
-                assert!(remaining.iter().any(|chunk| chunk.index == 3));
-
-                let unfinished_tq_chunk = remaining
-                    .iter()
-                    .find(|chunk| chunk.index == 3)
-                    .expect("unfinished chunk should remain in queue");
-                assert!(unfinished_tq_chunk.target_quality.target.is_some());
-                assert!(unfinished_tq_chunk.tq_cq.is_none());
-            }
-        }
-
         if self.args.resume && done_json_exists {
             let done = fs::read_to_string(done_path)
                 .with_context(|| "Failed to read contents of done.json")?;
@@ -1640,5 +1365,275 @@ impl Av1anContext {
             save_chunk_queue(&self.args.temp, &chunks)?;
             Ok((chunks, num_chunks))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::{Path, PathBuf},
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Mutex,
+        },
+    };
+
+    use dashmap::DashMap;
+    use once_cell::sync::Lazy;
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::{
+        ffmpeg::FFPixelFormat,
+        scenes::Scene,
+        settings::{InputPixelFormat, PixelFormat},
+        ChunkOrdering,
+        DoneChunk,
+        DoneJson,
+        Encoder,
+        Input,
+        ProbingStatistic,
+        ProbingStatisticName,
+        SplitMethod,
+        TargetQuality,
+        Verbosity,
+    };
+
+    static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    fn test_input_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test-files")
+            .join("blank_1080p.mkv")
+    }
+
+    fn reset_done_state(frames: usize) {
+        let done = init_done(DoneJson {
+            frames:     AtomicUsize::new(frames),
+            done:       DashMap::new(),
+            audio_done: AtomicBool::new(false),
+        });
+        done.frames.store(frames, Ordering::Relaxed);
+        done.done.clear();
+        done.audio_done.store(false, Ordering::Relaxed);
+    }
+
+    fn build_target_quality(temp: &str) -> TargetQuality {
+        let mut target_quality = TargetQuality::default(temp, Encoder::aom);
+        target_quality.target = Some((95.0, 96.0));
+        target_quality.probing_statistic = ProbingStatistic {
+            name:  ProbingStatisticName::Automatic,
+            value: None,
+        };
+        target_quality
+    }
+
+    fn build_context(temp: &Path, resume: bool, target_quality: TargetQuality) -> Av1anContext {
+        let input = Input::Video {
+            path:         test_input_path(),
+            temp:         temp.to_string_lossy().to_string(),
+            chunk_method: ChunkMethod::Select,
+            is_proxy:     false,
+            cache_mode:   crate::vapoursynth::CacheSource::SOURCE,
+        };
+
+        let args = EncodeArgs {
+            input,
+            proxy: None,
+            temp: temp.to_string_lossy().to_string(),
+            output_file: temp.join("out.ivf").to_string_lossy().to_string(),
+            chunk_method: ChunkMethod::Select,
+            chunk_order: ChunkOrdering::Sequential,
+            scaler: String::new(),
+            scenes: None,
+            split_method: SplitMethod::None,
+            sc_pix_format: None,
+            sc_method: crate::ScenecutMethod::Standard,
+            sc_only: false,
+            sc_downscale_height: None,
+            extra_splits_len: None,
+            min_scene_len: 12,
+            force_keyframes: Vec::new(),
+            ignore_frame_mismatch: false,
+            max_tries: 1,
+            passes: 1,
+            video_params: Vec::new(),
+            tiles: (1, 1),
+            encoder: Encoder::aom,
+            workers: 1,
+            set_thread_affinity: None,
+            photon_noise: None,
+            photon_noise_size: (None, None),
+            chroma_noise: false,
+            zones: None,
+            cache_mode: crate::vapoursynth::CacheSource::SOURCE,
+            pix_format_converter: crate::PixelFormatConverter::FFMPEG,
+            ffmpeg_filter_args: Vec::new(),
+            audio_params: Vec::new(),
+            input_pix_format: InputPixelFormat::FFmpeg {
+                format: FFPixelFormat::YUV420P10LE,
+            },
+            output_pix_format: PixelFormat {
+                format:    FFPixelFormat::YUV420P10LE,
+                bit_depth: 10,
+            },
+            verbosity: Verbosity::Normal,
+            resume,
+            keep: true,
+            force: true,
+            no_defaults: true,
+            tile_auto: false,
+            concat: crate::ConcatMethod::FFmpeg,
+            target_quality,
+            vmaf: false,
+            vmaf_path: None,
+            vmaf_res: "1920x1080".to_string(),
+            probe_res: None,
+            vmaf_threads: None,
+            vmaf_filter: None,
+            vapoursynth_plugins: None,
+        };
+
+        Av1anContext {
+            frames: 10,
+            vs_script: None,
+            vs_proxy_script: None,
+            args,
+            scene_factory: SceneFactory::new(),
+        }
+    }
+
+    fn make_chunk(temp: &Path, index: usize, target_quality: &TargetQuality) -> Chunk {
+        Chunk {
+            temp: temp.to_string_lossy().to_string(),
+            index,
+            input: Input::Video {
+                path:         test_input_path(),
+                temp:         temp.to_string_lossy().to_string(),
+                chunk_method: ChunkMethod::Select,
+                is_proxy:     false,
+                cache_mode:   crate::vapoursynth::CacheSource::SOURCE,
+            },
+            proxy: None,
+            source_cmd: vec!["ffmpeg".into()],
+            proxy_cmd: None,
+            output_ext: "ivf".to_string(),
+            start_frame: index * 10,
+            end_frame: index * 10 + 10,
+            frame_rate: 24.0,
+            passes: 1,
+            video_params: vec![],
+            encoder: Encoder::aom,
+            noise_size: (None, None),
+            target_quality: target_quality.clone(),
+            tq_cq: None,
+            ignore_frame_mismatch: false,
+        }
+    }
+
+    #[test]
+    fn queue_construction_with_target_quality_keeps_tq_cq_none() {
+        let _guard = TEST_MUTEX.lock().expect("mutex should lock");
+        let temp = tempdir().expect("temp dir should be created");
+        reset_done_state(0);
+
+        let target_quality = build_target_quality(temp.path().to_string_lossy().as_ref());
+        let context = build_context(temp.path(), false, target_quality);
+        let scenes = vec![
+            Scene {
+                start_frame:    0,
+                end_frame:      5,
+                zone_overrides: None,
+            },
+            Scene {
+                start_frame:    5,
+                end_frame:      10,
+                zone_overrides: None,
+            },
+        ];
+
+        let queue = context
+            .create_video_queue_select(&scenes)
+            .expect("queue construction should succeed");
+
+        assert_eq!(queue.len(), 2);
+        assert!(queue.iter().all(|chunk| chunk.target_quality.target.is_some()));
+        assert!(queue.iter().all(|chunk| chunk.tq_cq.is_none()));
+    }
+
+    #[test]
+    fn chunk_queue_serialization_preserves_null_tq_cq() {
+        let _guard = TEST_MUTEX.lock().expect("mutex should lock");
+        let temp = tempdir().expect("temp dir should be created");
+        reset_done_state(0);
+
+        let target_quality = build_target_quality(temp.path().to_string_lossy().as_ref());
+        let queue = vec![
+            make_chunk(temp.path(), 1, &target_quality),
+            make_chunk(temp.path(), 2, &target_quality),
+            make_chunk(temp.path(), 3, &target_quality),
+        ];
+
+        save_chunk_queue(temp.path().to_string_lossy().as_ref(), &queue)
+            .expect("chunk queue should serialize");
+        let chunk_json =
+            fs::read_to_string(temp.path().join("chunks.json")).expect("chunks.json should exist");
+        assert_eq!(
+            chunk_json.matches("\"per_shot_target_quality_cq\":null").count(),
+            queue.len()
+        );
+
+        let reloaded = read_chunk_queue(temp.path()).expect("chunk queue should deserialize");
+        assert!(reloaded.iter().all(|chunk| chunk.tq_cq.is_none()));
+    }
+
+    #[test]
+    fn resume_filtering_keeps_unfinished_target_quality_chunks() {
+        let _guard = TEST_MUTEX.lock().expect("mutex should lock");
+        let temp = tempdir().expect("temp dir should be created");
+        reset_done_state(30);
+
+        let target_quality = build_target_quality(temp.path().to_string_lossy().as_ref());
+        let queue = vec![
+            make_chunk(temp.path(), 1, &target_quality),
+            make_chunk(temp.path(), 2, &target_quality),
+            make_chunk(temp.path(), 3, &target_quality),
+        ];
+        save_chunk_queue(temp.path().to_string_lossy().as_ref(), &queue)
+            .expect("chunk queue should serialize");
+
+        get_done().done.insert(queue[0].name(), DoneChunk {
+            frames:     queue[0].frames(),
+            size_bytes: 128,
+        });
+        fs::write(
+            temp.path().join("done.json"),
+            serde_json::to_string(get_done()).expect("done state should serialize"),
+        )
+        .expect("done.json should be written");
+
+        let persisted_done: DoneJson = serde_json::from_str(
+            &fs::read_to_string(temp.path().join("done.json"))
+                .expect("done.json should be readable"),
+        )
+        .expect("done.json should deserialize");
+        assert!(persisted_done.done.contains_key(&queue[0].name()));
+
+        let context = build_context(temp.path(), true, target_quality);
+        let (remaining, total_chunks) =
+            context.load_or_gen_chunk_queue(&[]).expect("resume queue should load");
+
+        assert_eq!(total_chunks, 3);
+        assert_eq!(remaining.len(), 2);
+        assert!(!remaining.iter().any(|chunk| chunk.index == 1));
+        assert!(remaining.iter().any(|chunk| chunk.index == 2));
+        assert!(remaining.iter().any(|chunk| chunk.index == 3));
+
+        let unfinished_tq_chunk = remaining
+            .iter()
+            .find(|chunk| chunk.index == 3)
+            .expect("unfinished chunk should remain in queue");
+        assert!(unfinished_tq_chunk.target_quality.target.is_some());
+        assert!(unfinished_tq_chunk.tq_cq.is_none());
     }
 }

@@ -106,7 +106,7 @@ impl TargetQuality {
         next_quantizer: f32,
     ) -> String {
         format!(
-            "TQ chunk {chunk:05}: {metric} {min}-{max}, probe {current_probe}/{max_probes}, \
+            "TQ chunk {chunk:05}: {metric:?} {min}-{max}, probe {current_probe}/{max_probes}, \
              Q={next_quantizer}",
             chunk = chunk.index,
             metric = self.metric,
