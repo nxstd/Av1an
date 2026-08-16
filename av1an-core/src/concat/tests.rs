@@ -23,15 +23,20 @@ fn ivf_header(frame_count: u32, width: u16, fourcc: [u8; 4]) -> [u8; 32] {
     header
 }
 
-fn write_ivf(path: &Path, declared_frames: u32, width: u16, fourcc: [u8; 4], frames: &[(u64, &[u8])]) {
+fn write_ivf(
+    path: &Path,
+    declared_frames: u32,
+    width: u16,
+    fourcc: [u8; 4],
+    frames: &[(u64, &[u8])],
+) {
     let mut file = File::create(path).expect("chunk should be created");
     file.write_all(&ivf_header(declared_frames, width, fourcc))
         .expect("header should be written");
     for (timestamp, payload) in frames {
         file.write_all(&(payload.len() as u32).to_le_bytes())
             .expect("frame size should be written");
-        file.write_all(&timestamp.to_le_bytes())
-            .expect("timestamp should be written");
+        file.write_all(&timestamp.to_le_bytes()).expect("timestamp should be written");
         file.write_all(payload).expect("payload should be written");
     }
 }
@@ -94,35 +99,26 @@ fn two_valid_ivf_chunks_are_concatenated() {
     let temp = tempdir().expect("temp dir should be created");
     let encode = temp.path().join("encode");
     fs::create_dir(&encode).expect("encode dir should be created");
-    write_ivf(
-        &encode.join("00000.ivf"),
-        2,
-        1920,
-        *b"AV01",
-        &[(0, b"first"), (1, b"second")],
-    );
-    write_ivf(
-        &encode.join("00001.ivf"),
-        2,
-        1920,
-        *b"AV01",
-        &[(0, b"third"), (1, b"fourth")],
-    );
+    write_ivf(&encode.join("00000.ivf"), 2, 1920, *b"AV01", &[
+        (0, b"first"),
+        (1, b"second"),
+    ]);
+    write_ivf(&encode.join("00001.ivf"), 2, 1920, *b"AV01", &[
+        (0, b"third"),
+        (1, b"fourth"),
+    ]);
 
     let output = temp.path().join("output.ivf");
     ivf(&encode, &output).expect("chunks should concatenate");
 
     let (count, frames) = output_frames(&output);
     assert_eq!(count, 4);
-    assert_eq!(
-        frames,
-        vec![
-            (0, b"first".to_vec()),
-            (1, b"second".to_vec()),
-            (2, b"third".to_vec()),
-            (3, b"fourth".to_vec()),
-        ]
-    );
+    assert_eq!(frames, vec![
+        (0, b"first".to_vec()),
+        (1, b"second".to_vec()),
+        (2, b"third".to_vec()),
+        (3, b"fourth".to_vec()),
+    ]);
 }
 
 #[test]
@@ -186,13 +182,9 @@ fn output_frame_count_uses_actual_frames() {
     let temp = tempdir().expect("temp dir should be created");
     let encode = temp.path().join("encode");
     fs::create_dir(&encode).expect("encode dir should be created");
-    write_ivf(
-        &encode.join("00000.ivf"),
-        99,
-        1920,
-        *b"AV01",
-        &[(0, b"actual")],
-    );
+    write_ivf(&encode.join("00000.ivf"), 99, 1920, *b"AV01", &[(
+        0, b"actual",
+    )]);
 
     let output = temp.path().join("output.ivf");
     ivf(&encode, &output).expect("chunk should concatenate");

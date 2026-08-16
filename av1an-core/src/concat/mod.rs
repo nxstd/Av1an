@@ -72,7 +72,11 @@ pub fn ivf(input: &Path, out: &Path) -> anyhow::Result<()> {
     let mut files: Vec<PathBuf> = read_in_dir(input)?.collect();
 
     sort_files_by_filename(&mut files);
-    anyhow::ensure!(!files.is_empty(), "No IVF chunks found in {}", input.display());
+    anyhow::ensure!(
+        !files.is_empty(),
+        "No IVF chunks found in {}",
+        input.display()
+    );
 
     let result = (|| {
         let mut first_input = File::open(&files[0])
@@ -99,13 +103,14 @@ pub fn ivf(input: &Path, out: &Path) -> anyhow::Result<()> {
                     u32::from_le_bytes(frame_header[..4].try_into().expect("slice length"));
                 let local_timestamp =
                     u64::from_le_bytes(frame_header[4..].try_into().expect("slice length"));
-                let output_timestamp = local_timestamp.checked_add(pos_offset).ok_or_else(|| {
-                    anyhow!(
-                        "IVF timestamp overflow in {} at frame {}",
-                        file.display(),
-                        frame_index
-                    )
-                })?;
+                let output_timestamp =
+                    local_timestamp.checked_add(pos_offset).ok_or_else(|| {
+                        anyhow!(
+                            "IVF timestamp overflow in {} at frame {}",
+                            file.display(),
+                            frame_index
+                        )
+                    })?;
 
                 output.write_all(&payload_size.to_le_bytes())?;
                 output.write_all(&output_timestamp.to_le_bytes())?;
@@ -179,7 +184,11 @@ fn validate_compatible_ivf_header(
     current: &IvfHeader,
     path: &Path,
 ) -> anyhow::Result<()> {
-    anyhow::ensure!(first.fourcc == current.fourcc, "Incompatible IVF FourCC in {}", path.display());
+    anyhow::ensure!(
+        first.fourcc == current.fourcc,
+        "Incompatible IVF FourCC in {}",
+        path.display()
+    );
     anyhow::ensure!(
         first.width == current.width && first.height == current.height,
         "Incompatible IVF dimensions in {}",
@@ -226,8 +235,8 @@ fn copy_ivf_payload(
     let mut remaining = u64::from(payload_size);
     let mut buffer = [0u8; 64 * 1024];
     while remaining > 0 {
-        let read_len = usize::try_from(remaining.min(buffer.len() as u64))
-            .expect("buffer length fits usize");
+        let read_len =
+            usize::try_from(remaining.min(buffer.len() as u64)).expect("buffer length fits usize");
         let bytes_read = input
             .read(&mut buffer[..read_len])
             .with_context(|| format!("Failed to read IVF payload in {}", path.display()))?;
