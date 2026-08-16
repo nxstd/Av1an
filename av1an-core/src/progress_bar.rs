@@ -276,7 +276,7 @@ pub fn update_worker_progress_msg(verbosity: Verbosity, worker_idx: usize, msg: 
     match verbosity {
         Verbosity::Normal => {
             if let Some(pb) = PROGRESS_BAR.get() {
-                pb.set_message(msg);
+                pb.set_message(format!(", {msg}"));
             }
         },
         Verbosity::Verbose => update_mp_msg(worker_idx, msg),
