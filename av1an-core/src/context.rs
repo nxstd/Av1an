@@ -386,6 +386,18 @@ impl Av1anContext {
                     frames:     queue[0].frames(),
                     size_bytes: 128,
                 });
+                fs::write(
+                    temp.path().join("done.json"),
+                    serde_json::to_string(get_done()).expect("done state should serialize"),
+                )
+                .expect("done.json should be written");
+
+                let persisted_done: DoneJson = serde_json::from_str(
+                    &fs::read_to_string(temp.path().join("done.json"))
+                        .expect("done.json should be readable"),
+                )
+                .expect("done.json should deserialize");
+                assert!(persisted_done.done.contains_key(&queue[0].name()));
 
                 let context = build_context(temp.path(), true, target_quality);
                 let (remaining, total_chunks) =
