@@ -20,6 +20,7 @@ use tracing::{debug, error, warn};
 
 use crate::{
     context::Av1anContext,
+    ffmpeg::get_num_frames,
     finish_progress_bar,
     get_done,
     progress_bar::{
@@ -29,6 +30,7 @@ use crate::{
         update_progress_bar_estimates,
         update_worker_progress_msg,
     },
+    target_quality::validate_full_rate_probe_frame_count,
     util::printable_base10_digits,
     Chunk,
     DoneChunk,
@@ -131,6 +133,13 @@ fn target_quality_needs_probing(chunk: &Chunk) -> bool {
 
 fn can_start_next_chunk(terminations_requested: &AtomicU8) -> bool {
     terminations_requested.load(Ordering::SeqCst) == 0
+}
+
+fn validate_reused_probe_frame_count(chunk: &Chunk, actual_frames: usize) -> anyhow::Result<()> {
+    if chunk.target_quality.probing_rate == 1 && !chunk.ignore_frame_mismatch {
+        validate_full_rate_probe_frame_count(chunk.frames(), actual_frames)?;
+    }
+    Ok(())
 }
 
 impl Broker<'_> {
@@ -322,34 +331,47 @@ impl Broker<'_> {
                     });
 
                 if probe_file.exists() {
-                    let encode_dir = std::path::Path::new(&self.project.args.temp).join("encode");
-                    std::fs::create_dir_all(&encode_dir)?;
-                    let output_file =
-                        encode_dir.join(format!("{index:05}.{extension}", index = chunk.index));
-                    std::fs::copy(&probe_file, &output_file)?;
-
-                    inc_progress_bar_for_verbosity(
-                        self.project.args.verbosity,
-                        chunk.frames() as u64,
-                    );
-
-                    let progress_file = Path::new(&self.project.args.temp).join("done.json");
-                    get_done().done.insert(chunk.name(), DoneChunk {
-                        frames:     chunk.frames(),
-                        size_bytes: output_file.metadata()?.len(),
+                    let reuse_validation = get_num_frames(&probe_file).and_then(|actual_frames| {
+                        validate_reused_probe_frame_count(chunk, actual_frames)
                     });
+                    if let Err(error) = reuse_validation {
+                        warn!(
+                            "Selected Target Quality probe for chunk {} is invalid; removing it \
+                             and falling back to final encoding: {error}",
+                            chunk.index
+                        );
+                        let _ = std::fs::remove_file(&probe_file);
+                    } else {
+                        let encode_dir =
+                            std::path::Path::new(&self.project.args.temp).join("encode");
+                        std::fs::create_dir_all(&encode_dir)?;
+                        let output_file =
+                            encode_dir.join(format!("{index:05}.{extension}", index = chunk.index));
+                        std::fs::copy(&probe_file, &output_file)?;
 
-                    let mut progress_file = File::create(progress_file)?;
-                    progress_file.write_all(serde_json::to_string(get_done())?.as_bytes())?;
+                        inc_progress_bar_for_verbosity(
+                            self.project.args.verbosity,
+                            chunk.frames() as u64,
+                        );
 
-                    update_progress_bar_estimates(
-                        chunk.frame_rate,
-                        self.project.frames,
-                        self.project.args.verbosity,
-                        (get_done().done.len() as u32, total_chunks),
-                    );
+                        let progress_file = Path::new(&self.project.args.temp).join("done.json");
+                        get_done().done.insert(chunk.name(), DoneChunk {
+                            frames:     chunk.frames(),
+                            size_bytes: output_file.metadata()?.len(),
+                        });
 
-                    return Ok(());
+                        let mut progress_file = File::create(progress_file)?;
+                        progress_file.write_all(serde_json::to_string(get_done())?.as_bytes())?;
+
+                        update_progress_bar_estimates(
+                            chunk.frame_rate,
+                            self.project.frames,
+                            self.project.args.verbosity,
+                            (get_done().done.len() as u32, total_chunks),
+                        );
+
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -522,6 +544,28 @@ mod tests {
 
         assert!(can_start_next_chunk(&terminations_requested));
         assert!(can_finalize_target_quality(&terminations_requested));
+    }
+
+    #[test]
+    fn valid_reused_full_rate_probe_is_accepted() {
+        let chunk = target_quality_chunk(Some(42.0));
+
+        assert!(validate_reused_probe_frame_count(&chunk, chunk.frames()).is_ok());
+    }
+
+    #[test]
+    fn truncated_reused_probe_is_rejected_before_fast_reuse() {
+        let chunk = target_quality_chunk(Some(42.0));
+
+        assert!(validate_reused_probe_frame_count(&chunk, chunk.frames() - 1).is_err());
+    }
+
+    #[test]
+    fn ignored_frame_mismatch_allows_reused_probe() {
+        let mut chunk = target_quality_chunk(Some(42.0));
+        chunk.ignore_frame_mismatch = true;
+
+        assert!(validate_reused_probe_frame_count(&chunk, chunk.frames() - 1).is_ok());
     }
 
     #[test]
