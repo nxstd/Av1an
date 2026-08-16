@@ -109,12 +109,12 @@ impl Display for EncoderCrash {
     }
 }
 
-fn is_termination_requested(terminations_requested: &AtomicU8) -> bool {
-    terminations_requested.load(Ordering::SeqCst) > 0
+fn is_hard_shutdown_requested(terminations_requested: &AtomicU8) -> bool {
+    terminations_requested.load(Ordering::SeqCst) >= 2
 }
 
 fn can_finalize_target_quality(terminations_requested: &AtomicU8) -> bool {
-    !is_termination_requested(terminations_requested)
+    !is_hard_shutdown_requested(terminations_requested)
 }
 
 fn should_retry_target_quality(
@@ -127,6 +127,10 @@ fn should_retry_target_quality(
 
 fn target_quality_needs_probing(chunk: &Chunk) -> bool {
     chunk.target_quality.target.is_some() && chunk.tq_cq.is_none()
+}
+
+fn can_start_next_chunk(terminations_requested: &AtomicU8) -> bool {
+    terminations_requested.load(Ordering::SeqCst) == 0
 }
 
 impl Broker<'_> {
@@ -192,7 +196,7 @@ impl Broker<'_> {
                             }
 
                             while let Ok(mut chunk) = rx.recv() {
-                                if terminations_requested.load(Ordering::SeqCst) == 0
+                                if can_start_next_chunk(&terminations_requested)
                                     && let Err(e) = queue.encode_chunk(
                                         &mut chunk,
                                         worker_id,
@@ -273,10 +277,10 @@ impl Broker<'_> {
                             r#try,
                             self.project.args.max_tries,
                         ) {
-                            if is_termination_requested(terminations_requested) {
+                            if is_hard_shutdown_requested(terminations_requested) {
                                 bail!(
-                                    "Termination requested during Target Quality. Skipping chunk \
-                                     {}",
+                                    "Hard shutdown requested during Target Quality. Skipping \
+                                     chunk {}",
                                     chunk.index
                                 );
                             }
@@ -295,7 +299,7 @@ impl Broker<'_> {
         if chunk.target_quality.target.is_some() {
             if !can_finalize_target_quality(terminations_requested) {
                 bail!(
-                    "Termination requested during Target Quality. Skipping chunk {}",
+                    "Hard shutdown requested during Target Quality. Skipping chunk {}",
                     chunk.index
                 );
             }
@@ -350,9 +354,9 @@ impl Broker<'_> {
             }
         }
 
-        if terminations_requested.load(Ordering::SeqCst) > 0 {
+        if is_hard_shutdown_requested(terminations_requested) {
             bail!(
-                "Termination requested after Target Quality. Skipping chunk {}",
+                "Hard shutdown requested after Target Quality. Skipping chunk {}",
                 chunk.index
             );
         }
@@ -478,18 +482,46 @@ mod tests {
     }
 
     #[test]
-    fn target_quality_does_not_retry_after_termination() {
+    fn first_ctrl_c_allows_target_quality_retry() {
         let terminations_requested = AtomicU8::new(1);
 
-        assert!(!should_retry_target_quality(&terminations_requested, 1, 3));
-        assert!(is_termination_requested(&terminations_requested));
+        assert!(should_retry_target_quality(&terminations_requested, 1, 3));
     }
 
     #[test]
-    fn interrupted_target_quality_chunk_is_not_finalized() {
+    fn second_ctrl_c_disables_target_quality_retry() {
+        let terminations_requested = AtomicU8::new(2);
+
+        assert!(!should_retry_target_quality(&terminations_requested, 1, 3));
+    }
+
+    #[test]
+    fn first_ctrl_c_allows_target_quality_finalization() {
         let terminations_requested = AtomicU8::new(1);
 
+        assert!(can_finalize_target_quality(&terminations_requested));
+    }
+
+    #[test]
+    fn second_ctrl_c_prevents_target_quality_finalization() {
+        let terminations_requested = AtomicU8::new(2);
+
         assert!(!can_finalize_target_quality(&terminations_requested));
+    }
+
+    #[test]
+    fn first_ctrl_c_prevents_starting_another_queued_chunk() {
+        let terminations_requested = AtomicU8::new(1);
+
+        assert!(!can_start_next_chunk(&terminations_requested));
+    }
+
+    #[test]
+    fn normal_operation_can_start_queued_chunks() {
+        let terminations_requested = AtomicU8::new(0);
+
+        assert!(can_start_next_chunk(&terminations_requested));
+        assert!(can_finalize_target_quality(&terminations_requested));
     }
 
     #[test]
