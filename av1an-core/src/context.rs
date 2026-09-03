@@ -74,10 +74,10 @@ pub struct Av1anContext {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HybridSegmentRange {
-    start_frame:            usize,
-    end_frame:              usize,
-    decoded_frame_count:    usize,
-    frame_addressable:       bool,
+    start_frame:         usize,
+    end_frame:           usize,
+    decoded_frame_count: usize,
+    frame_addressable:   bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +88,9 @@ enum HybridSceneSource {
         end_frame:   usize,
     },
     BoundaryCrossing,
-    UnsafeSegment { index: usize },
+    UnsafeSegment {
+        index: usize,
+    },
 }
 
 fn build_hybrid_segment_ranges(
@@ -145,7 +147,9 @@ fn map_hybrid_scene_to_source(
                     end_frame: end_frame - range.start_frame,
                 }
             } else {
-                HybridSceneSource::UnsafeSegment { index }
+                HybridSceneSource::UnsafeSegment {
+                    index,
+                }
             }
         })
 }
@@ -1404,7 +1408,9 @@ impl Av1anContext {
                             scene.zone_overrides.clone(),
                         )
                     },
-                    HybridSceneSource::UnsafeSegment { index: segment_index } => {
+                    HybridSceneSource::UnsafeSegment {
+                        index: segment_index,
+                    } => {
                         warn!(
                             "Hybrid chunk {index:05} [{}, {}) belongs to non-frame-addressable \
                              segment {}; using original input for this chunk",
@@ -1982,7 +1988,9 @@ mod tests {
         assert!(ranges[1].frame_addressable);
         assert_eq!(
             map_hybrid_scene_to_source(10, 90, &ranges),
-            HybridSceneSource::UnsafeSegment { index: 0 }
+            HybridSceneSource::UnsafeSegment {
+                index: 0
+            }
         );
         assert_eq!(
             map_hybrid_scene_to_source(100, 120, &ranges),
@@ -2007,7 +2015,9 @@ mod tests {
         assert_eq!(ranges[1].end_frame, 14_734);
         assert_eq!(
             map_hybrid_scene_to_source(14_548, 14_734, &ranges),
-            HybridSceneSource::UnsafeSegment { index: 1 }
+            HybridSceneSource::UnsafeSegment {
+                index: 1
+            }
         );
     }
 
