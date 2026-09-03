@@ -29,7 +29,7 @@ use crate::{
     concat::{self, ConcatMethod},
     create_dir,
     determine_workers,
-    ffmpeg::{compose_ffmpeg_pipe, get_num_frames},
+    ffmpeg::{compose_ffmpeg_pipe, get_num_decoded_frames, get_num_frames, get_num_packets},
     get_done,
     init_done,
     into_vec,
@@ -74,8 +74,10 @@ pub struct Av1anContext {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HybridSegmentRange {
-    start_frame: usize,
-    end_frame:   usize,
+    start_frame:         usize,
+    end_frame:           usize,
+    decoded_frame_count: usize,
+    frame_addressable:   bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,31 +87,36 @@ enum HybridSceneSource {
         start_frame: usize,
         end_frame:   usize,
     },
-    OriginalInput,
+    BoundaryCrossing,
+    UnsafeSegment {
+        index: usize,
+    },
 }
 
 fn build_hybrid_segment_ranges(
-    segment_lengths: &[usize],
+    segment_counts: &[(usize, usize)],
     expected_segment_count: usize,
     source_frames: usize,
 ) -> anyhow::Result<Vec<HybridSegmentRange>> {
     anyhow::ensure!(
-        segment_lengths.len() == expected_segment_count,
+        segment_counts.len() == expected_segment_count,
         "Hybrid segmentation file count mismatch: segments={}, expected={expected_segment_count}",
-        segment_lengths.len(),
+        segment_counts.len(),
     );
 
     let mut current_frame: usize = 0;
-    let ranges = segment_lengths
+    let ranges = segment_counts
         .iter()
-        .map(|&length| {
+        .map(|&(packet_count, decoded_frame_count)| {
             let start_frame = current_frame;
             current_frame = current_frame
-                .checked_add(length)
+                .checked_add(packet_count)
                 .ok_or_else(|| anyhow::anyhow!("Hybrid segmentation frame count overflow"))?;
             Ok(HybridSegmentRange {
                 start_frame,
                 end_frame: current_frame,
+                decoded_frame_count,
+                frame_addressable: packet_count == decoded_frame_count,
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -132,11 +139,17 @@ fn map_hybrid_scene_to_source(
         .iter()
         .enumerate()
         .find(|(_, range)| start_frame >= range.start_frame && end_frame <= range.end_frame)
-        .map_or(HybridSceneSource::OriginalInput, |(index, range)| {
-            HybridSceneSource::Segment {
-                index,
-                start_frame: start_frame - range.start_frame,
-                end_frame: end_frame - range.start_frame,
+        .map_or(HybridSceneSource::BoundaryCrossing, |(index, range)| {
+            if range.frame_addressable {
+                HybridSceneSource::Segment {
+                    index,
+                    start_frame: start_frame - range.start_frame,
+                    end_frame: end_frame - range.start_frame,
+                }
+            } else {
+                HybridSceneSource::UnsafeSegment {
+                    index,
+                }
             }
         })
 }
@@ -1323,12 +1336,12 @@ impl Av1anContext {
         let source_path = Path::new(&self.args.temp).join("split");
         let queue_files = Self::read_queue_files(&source_path)?;
 
-        let segment_lengths = queue_files
+        let segment_counts = queue_files
             .iter()
-            .map(|file| get_num_frames(file))
+            .map(|file| Ok((get_num_packets(file)?, get_num_decoded_frames(file)?)))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let segment_ranges =
-            build_hybrid_segment_ranges(&segment_lengths, to_split.len(), self.frames)?;
+            build_hybrid_segment_ranges(&segment_counts, to_split.len(), self.frames)?;
 
         for (index, range) in segment_ranges.iter().enumerate() {
             let requested_start = to_split[index];
@@ -1339,6 +1352,15 @@ impl Av1anContext {
                     queue_files[index].display(),
                     range.start_frame,
                     range.start_frame as isize - requested_start as isize,
+                );
+            }
+            if !range.frame_addressable {
+                warn!(
+                    "Hybrid segment {} is not independently frame-addressable: packets={}, \
+                     decoded={}; scenes using this segment will use original input",
+                    queue_files[index].display(),
+                    range.end_frame - range.start_frame,
+                    range.decoded_frame_count,
                 );
             }
         }
@@ -1364,7 +1386,7 @@ impl Av1anContext {
                         frame_rate,
                         scene.zone_overrides.clone(),
                     ),
-                    HybridSceneSource::OriginalInput => {
+                    HybridSceneSource::BoundaryCrossing => {
                         let boundary = segment_ranges.iter().find_map(|range| {
                             let boundary = range.end_frame;
                             (boundary > scene.start_frame && boundary < scene.end_frame)
@@ -1376,6 +1398,25 @@ impl Av1anContext {
                             scene.start_frame,
                             scene.end_frame,
                             boundary.expect("fallback scene should cross a physical boundary"),
+                        );
+                        self.create_hybrid_fallback_chunk(
+                            index,
+                            input,
+                            scene.start_frame,
+                            scene.end_frame,
+                            frame_rate,
+                            scene.zone_overrides.clone(),
+                        )
+                    },
+                    HybridSceneSource::UnsafeSegment {
+                        index: segment_index,
+                    } => {
+                        warn!(
+                            "Hybrid chunk {index:05} [{}, {}) belongs to non-frame-addressable \
+                             segment {}; using original input for this chunk",
+                            scene.start_frame,
+                            scene.end_frame,
+                            queue_files[segment_index].display(),
                         );
                         self.create_hybrid_fallback_chunk(
                             index,
@@ -1853,7 +1894,7 @@ mod tests {
 
     #[test]
     fn hybrid_aligned_segments_preserve_expected_local_ranges() {
-        let ranges = build_hybrid_segment_ranges(&[359, 97], 2, 456).unwrap();
+        let ranges = build_hybrid_segment_ranges(&[(359, 359), (97, 97)], 2, 456).unwrap();
 
         assert_eq!(
             map_hybrid_scene_to_source(359, 399, &ranges),
@@ -1867,7 +1908,7 @@ mod tests {
 
     #[test]
     fn hybrid_drift_maps_scene_to_actual_segment_or_original_input() {
-        let ranges = build_hybrid_segment_ranges(&[405, 51], 2, 456).unwrap();
+        let ranges = build_hybrid_segment_ranges(&[(405, 405), (51, 51)], 2, 456).unwrap();
 
         assert_eq!(
             map_hybrid_scene_to_source(359, 399, &ranges),
@@ -1879,17 +1920,20 @@ mod tests {
         );
         assert_eq!(
             map_hybrid_scene_to_source(399, 456, &ranges),
-            HybridSceneSource::OriginalInput
+            HybridSceneSource::BoundaryCrossing
         );
     }
 
     #[test]
     fn hybrid_equal_length_middle_segment_uses_cumulative_range() {
-        let ranges = build_hybrid_segment_ranges(&[110, 100, 90], 3, 300).unwrap();
+        let ranges =
+            build_hybrid_segment_ranges(&[(110, 110), (100, 100), (90, 90)], 3, 300).unwrap();
 
         assert_eq!(ranges[1], HybridSegmentRange {
-            start_frame: 110,
-            end_frame:   210,
+            start_frame:         110,
+            end_frame:           210,
+            decoded_frame_count: 100,
+            frame_addressable:   true,
         });
         assert_eq!(
             map_hybrid_scene_to_source(110, 200, &ranges),
@@ -1903,7 +1947,7 @@ mod tests {
 
     #[test]
     fn hybrid_scene_at_physical_boundary_maps_to_correct_segment() {
-        let ranges = build_hybrid_segment_ranges(&[100, 100], 2, 200).unwrap();
+        let ranges = build_hybrid_segment_ranges(&[(100, 100), (100, 100)], 2, 200).unwrap();
 
         assert_eq!(
             map_hybrid_scene_to_source(80, 100, &ranges),
@@ -1925,11 +1969,56 @@ mod tests {
 
     #[test]
     fn hybrid_segment_range_validation_rejects_untrusted_layout() {
-        let count_error = build_hybrid_segment_ranges(&[100], 2, 100).unwrap_err();
+        let count_error = build_hybrid_segment_ranges(&[(100, 100)], 2, 100).unwrap_err();
         assert!(count_error.to_string().contains("file count mismatch"));
 
-        let total_error = build_hybrid_segment_ranges(&[100, 99], 2, 200).unwrap_err();
+        let total_error = build_hybrid_segment_ranges(&[(100, 100), (99, 99)], 2, 200).unwrap_err();
         assert!(total_error.to_string().contains("frame total mismatch"));
+    }
+
+    #[test]
+    fn hybrid_unsafe_segment_uses_original_input_without_shifting_physical_ranges() {
+        let ranges = build_hybrid_segment_ranges(&[(100, 94), (100, 100)], 2, 200).unwrap();
+
+        assert_eq!(ranges[0].start_frame, 0);
+        assert_eq!(ranges[0].end_frame, 100);
+        assert_eq!(ranges[1].start_frame, 100);
+        assert_eq!(ranges[1].end_frame, 200);
+        assert!(!ranges[0].frame_addressable);
+        assert!(ranges[1].frame_addressable);
+        assert_eq!(
+            map_hybrid_scene_to_source(10, 90, &ranges),
+            HybridSceneSource::UnsafeSegment {
+                index: 0
+            }
+        );
+        assert_eq!(
+            map_hybrid_scene_to_source(100, 120, &ranges),
+            HybridSceneSource::Segment {
+                index:       1,
+                start_frame: 0,
+                end_frame:   20,
+            }
+        );
+    }
+
+    #[test]
+    fn hybrid_undecodable_segment_ergo_proxy_regression_uses_global_fallback() {
+        let ranges = build_hybrid_segment_ranges(
+            &[(14_436, 14_436), (298, 292), (22_357, 22_357)],
+            3,
+            37_091,
+        )
+        .unwrap();
+
+        assert_eq!(ranges[1].start_frame, 14_436);
+        assert_eq!(ranges[1].end_frame, 14_734);
+        assert_eq!(
+            map_hybrid_scene_to_source(14_548, 14_734, &ranges),
+            HybridSceneSource::UnsafeSegment {
+                index: 1
+            }
+        );
     }
 
     #[test]
@@ -1958,5 +2047,31 @@ mod tests {
                 format!("trim=start_frame={start_frame}:end_frame={end_frame},setpts=PTS-STARTPTS")
             );
         }
+    }
+
+    #[test]
+    fn hybrid_undecodable_segment_fallback_preserves_global_range_and_command() {
+        let temp = tempdir().expect("temp dir should be created");
+        let target_quality = build_target_quality(temp.path().to_string_lossy().as_ref());
+        let context = build_context(temp.path(), false, target_quality);
+        let input = context.args.input.as_video_path();
+        let chunk = context
+            .create_hybrid_fallback_chunk(114, input, 14_548, 14_734, 24.0, None)
+            .expect("fallback chunk should be created");
+        let filter_index = chunk
+            .source_cmd
+            .iter()
+            .position(|arg| arg == "-vf")
+            .expect("fallback command should contain a video filter");
+
+        assert_eq!(chunk.index, 114);
+        assert_eq!(chunk.input.as_video_path(), input);
+        assert_eq!(chunk.start_frame, 14_548);
+        assert_eq!(chunk.end_frame, 14_734);
+        assert_eq!(chunk.frames(), 186);
+        assert_eq!(
+            chunk.source_cmd[filter_index + 1].to_string_lossy(),
+            "trim=start_frame=14548:end_frame=14734,setpts=PTS-STARTPTS"
+        );
     }
 }

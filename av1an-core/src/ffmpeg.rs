@@ -118,6 +118,19 @@ fn parse_ffprobe_color_range(color_range: &str) -> Option<ColorRange> {
 /// Get frame count using FFmpeg
 #[inline]
 pub fn get_num_frames(source: &Path) -> anyhow::Result<usize> {
+    match get_num_packets(source) {
+        Ok(x) if x > 0 => Ok(x),
+        _ => {
+            // If we got empty output or a 0 frame count, try using the slower
+            // but more reliable method
+            get_num_decoded_frames(source)
+        },
+    }
+}
+
+/// Get the number of packets in the first video stream.
+#[inline]
+pub fn get_num_packets(source: &Path) -> anyhow::Result<usize> {
     let output = Command::new("ffprobe")
         .arg("-v")
         .arg("error")
@@ -131,18 +144,12 @@ pub fn get_num_frames(source: &Path) -> anyhow::Result<usize> {
         .arg(source)
         .output()?
         .stdout;
-    match String::from_utf8_lossy(&output).trim().parse::<usize>() {
-        Ok(x) if x > 0 => Ok(x),
-        _ => {
-            // If we got empty output or a 0 frame count, try using the slower
-            // but more reliable method
-            get_num_frames_slow(source)
-        },
-    }
+    Ok(String::from_utf8_lossy(&output).trim().parse::<usize>()?)
 }
 
-/// Slower but more reliable frame count method
-fn get_num_frames_slow(source: &Path) -> anyhow::Result<usize> {
+/// Get the number of independently decoded frames in the first video stream.
+#[inline]
+pub fn get_num_decoded_frames(source: &Path) -> anyhow::Result<usize> {
     let output = Command::new("ffprobe")
         .arg("-v")
         .arg("error")
