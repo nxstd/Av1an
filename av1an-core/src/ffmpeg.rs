@@ -140,7 +140,7 @@ pub fn get_num_packets(source: &Path) -> anyhow::Result<usize> {
         .arg("-show_entries")
         .arg("stream=nb_read_packets")
         .arg("-print_format")
-        .arg("csv=p=0")
+        .arg("default=noprint_wrappers=1:nokey=1")
         .arg(source)
         .output()?
         .stdout;
