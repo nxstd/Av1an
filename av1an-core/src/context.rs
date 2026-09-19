@@ -1015,6 +1015,8 @@ impl Av1anContext {
             self.args.output_pix_format.format.to_pix_fmt_string(),
             "-strict",
             "-1",
+            "-fps_mode",
+            "passthrough",
             "-f",
             "yuv4mpegpipe",
             "-",
